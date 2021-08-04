@@ -784,18 +784,60 @@ out:
 
 }
 
+/* Should all go away */
 static mutex_t resolve_mutex;
 static cond_t resolve_cond;
 static mutex_t resolve_cond_mutex;
-static enum {
-    R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
-} resolve_state;
+static uint8_t resolve_state;
+
+typedef void (*async_cb_t)(void /* async_at_t */ *aap, void *arg, const char *code);
+
+struct async_at {
+    at_urc_t urc;
+    cond_t cond;
+    mutex_t cond_mutex;
+    enum {
+        R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
+    } state;
+    async_cb_t cb;
+    void *arg;
+    xtimer_t timeout_timer;
+};
+
+typedef struct async_at async_at_t;
+
+static void _async_at_cb(void *arg, const char *code) {
+    async_at_t *aap = (async_at_t *) arg;
+
+    mutex_lock(&aap->cond_mutex);
+    aap->cb(aap, aap->arg, code);
+    cond_signal(&aap->cond);
+    mutex_unlock(&aap->cond_mutex);
+}
+
+static void _async_resolve_cb(void *async_at, void *arg, const char *code) {
+    async_at_t *aap = (async_at_t *) async_at;
+    char *result = arg;
+    const char *resp = code;
+
+    if (1 == sscanf(resp, "+CDNSGIP: 1,\"%*[^\"]\",\"%[^\"]", result)) {
+        aap->state = R_DONE;
+    }
+    else {
+        uint8_t errcode;
+        if (1 == sscanf(resp, "+CDNSGIP: 0,%" SCNu8, &errcode)) {
+            printf("Resolve error %" PRIu8, errcode);
+        }
+        aap->state = R_ERROR;
+    }
+}
+
 
 /*
  * URC callback for a response like: +CDNSGIP: 1,"lab-pc.ssvl.kth.se","192.16.125.232" 
  * Argument arg is pointer to char buffer where lookup result should be stored. 
  */
-static void _resolve_urc_cb(void *arg, const char *code) {
+void _resolve_urc_cb(void *arg, const char *code) {
     char *result = arg;
     const char *resp = code;
 
@@ -814,7 +856,7 @@ static void _resolve_urc_cb(void *arg, const char *code) {
     mutex_unlock(&resolve_cond_mutex);
 }
 
-static void _resolve_timeout_cb(void *arg)
+void _resolve_timeout_cb(void *arg)
 {
     (void) arg;
     mutex_lock(&resolve_cond_mutex);
@@ -824,7 +866,83 @@ static void _resolve_timeout_cb(void *arg)
     mutex_unlock(&resolve_cond_mutex);
 }
 
+static void _async_timeout_cb(void *arg)
+{
+    async_at_t *aap = (async_at_t *) arg;
+    mutex_lock(&aap->cond_mutex);
+    printf("AAT timeout\n");
+    aap->state = R_TIMEOUT;
+    cond_signal(&aap->cond);
+    mutex_unlock(&aap->cond_mutex);
+}
+
+static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const char *code, uint32_t offset) {
+    aap->state = R_WAIT;
+    aap->urc.cb = _async_at_cb;
+    aap->urc.arg = aap;
+    aap->urc.code = code;
+    aap->cb = cb;
+    aap->arg = arg;
+
+    at_add_urc(&at_dev, &aap->urc);
+    aap->timeout_timer.callback = _async_timeout_cb;
+    xtimer_set(&aap->timeout_timer, offset);
+}
+
+static void _async_at_stop(async_at_t *aap) {
+    xtimer_remove(&aap->timeout_timer);
+    at_remove_urc(&at_dev, &aap->urc);
+}
+
+static int _async_at_wait(async_at_t *aap) {
+    mutex_lock(&aap->cond_mutex);
+    while (aap->state == R_WAIT)
+        cond_wait(&aap->cond, &aap->cond_mutex);
+    mutex_unlock(&aap->cond_mutex);
+    if (aap->state != R_DONE)
+        return -1;
+    else 
+        return 0;
+}
+
 int sim7020_resolve(const char *domain, char *result) {
+    int res;
+    async_at_t async_at;
+
+    if (status.state != AT_RADIO_STATE_ACTIVE)
+        return -ENETUNREACH;
+
+    /* Only one at a time */
+    mutex_lock(&resolve_mutex); 
+
+    _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
+
+    SIM_LOCK();
+    /* Check signal quality */
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CSQ", 10*1000000);
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
+
+    SIM_UNLOCK();
+
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "AT+CDNSGIP=%s", domain);
+    SIM_LOCK();
+    res = at_send_cmd_wait_ok(&at_dev, cmd, 120*1000000);
+    SIM_UNLOCK();
+    if (res < 0) {
+        netstats.commfail_count++;
+        _module_reset();
+        goto out;
+    }
+    res = _async_at_wait(&async_at);
+
+out:
+    mutex_unlock(&resolve_mutex);
+    _async_at_stop(&async_at);
+    return res;
+}
+
+int xsim7020_resolve(const char *domain, char *result) {
     static at_urc_t urc;
     xtimer_t timeout_timer;
     int res;
