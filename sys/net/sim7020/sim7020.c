@@ -832,6 +832,19 @@ static void _async_resolve_cb(void *async_at, void *arg, const char *code) {
     }
 }
 
+static void _async_ok_cb(void *async_at, void *arg, const char *code) {
+    async_at_t *aap = (async_at_t *) async_at;
+    const char *resp = code;
+    (void) arg;
+
+    if (0 == strncmp(resp, "OK", sizeof("OK")-1)) {
+        aap->state = R_DONE;
+    }
+    else {
+        aap->state = R_ERROR;
+    }
+}
+
 
 /*
  * URC callback for a response like: +CDNSGIP: 1,"lab-pc.ssvl.kth.se","192.16.125.232" 
@@ -904,6 +917,19 @@ static int _async_at_wait(async_at_t *aap) {
     else 
         return 0;
 }
+
+ int _async_at_send_cmd_wait_ok(at_dev_t *dev, const char *command, uint32_t timeout) {
+    async_at_t async_at;
+    int res;
+
+    _async_at_setup(&async_at, _async_ok_cb, NULL, "OK", timeout);
+    res = at_send_cmd(dev, command, timeout);
+    if (res == 0) 
+        res = _async_at_wait(&async_at);
+    _async_at_stop(&async_at);
+    return res;
+}
+
 
 int sim7020_resolve(const char *domain, char *result) {
     int res;
