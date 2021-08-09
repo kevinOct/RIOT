@@ -54,13 +54,13 @@ struct sock_sim7020 {
     sim7020_recv_callback_t recv_callback;
     void *recv_callback_arg;
 };
+typedef struct sock_sim7020 sim7020_socket_t;
 
 typedef void (*async_cb_t)(void /* async_at_t */ *aap, void *arg, const char *code);
 
 struct async_at {
+    const char *cmd;
     at_urc_t urc;
-    cond_t cond;
-    mutex_t cond_mutex;
     enum {
         R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
     } state;
@@ -69,10 +69,7 @@ struct async_at {
     xtimer_t timeout_timer;
     kernel_pid_t pid;
 };
-
 typedef struct async_at async_at_t;
-
-typedef struct sock_sim7020 sim7020_socket_t;
 
 static sim7020_netstats_t netstats;
 
@@ -96,7 +93,6 @@ static char sim7020_stack[THREAD_STACKSIZE_DEFAULT + AT_BUF_SIZE];
 #define SIM7020_PRIO         (THREAD_PRIORITY_MAIN + 2)
 static kernel_pid_t sim7020_pid = KERNEL_PID_UNDEF;
 
-
 static int _sock_close(uint8_t sockid);
 static void *sim7020_thread(void *);
 
@@ -108,31 +104,17 @@ sim7020_netstats_t *sim7020_get_netstats(void) {
 
 static void _async_at_cb(void *arg, const char *code) {
     async_at_t *aap = (async_at_t *) arg;
-
-    printf("async_at cb '%s'\n", aap->urc.code);
-    //mutex_lock(&aap->cond_mutex);
-    printf("asybc_at call callback\n");
+    printf("\nAAT callback '%s' for '%s'\n", aap->cmd, aap->urc.code);
     aap->cb(aap, aap->arg, code);
-    printf("asybc_at return callback\n");
-    printf("callback Wakeup %d\n", aap->pid);
     thread_wakeup(aap->pid);
-
-    //cond_signal(&aap->cond);
-    printf("asybc_at unlock  callback\n");
-    //mutex_unlock(&aap->cond_mutex);
 }
 
 static void _async_timeout_cb(void *arg)
 {
     async_at_t *aap = (async_at_t *) arg;
-    //mutex_lock(&aap->cond_mutex);
-    printf("AAT timeout for '%s'\n", aap->urc.code);
+    printf("AAT timeout '%s' for '%s'\n", aap->cmd, aap->urc.code);
     aap->state = R_TIMEOUT;
-    //cond_signal(&aap->cond);
-    printf("timeout Wakeup %d\n", aap->pid);
     thread_wakeup(aap->pid);
-    printf("Did timeout Wakeup %d\n", aap->pid);
-    //mutex_unlock(&aap->cond_mutex);
 }
 
 static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const char *code, uint32_t offset) {
@@ -141,14 +123,10 @@ static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const cha
     aap->arg = arg;
     aap->pid = thread_getpid();
 
-    cond_init(&aap->cond);
-    mutex_init(&aap->cond_mutex);
-
     aap->urc.cb = _async_at_cb;
     aap->urc.arg = aap;
     aap->urc.code = code;
     at_add_urc(&at_dev, &aap->urc);
-    printf("Add URC for '%s'\n", aap->urc.code);
 
     aap->timeout_timer.callback = _async_timeout_cb;
     aap->timeout_timer.arg = aap;
@@ -156,32 +134,21 @@ static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const cha
 }
 
 static void _async_at_stop(async_at_t *aap) {
-    printf("%d: Stop for %s\n", aap->pid, aap->urc.code);
     xtimer_remove(&aap->timeout_timer);
     at_remove_urc(&at_dev, &aap->urc);
 }
 
 static int _async_at_wait(async_at_t *aap) {
-    printf("%d: Wait for '%s'\n", aap->pid, aap->urc.code);
-    mutex_lock(&aap->cond_mutex);
     while (aap->state == R_WAIT)
-        //printf("WAIT WAIT\n"), cond_wait(&aap->cond, &aap->cond_mutex);
-        printf("WAIT WAIT\n"), thread_sleep();
-    printf("%d: done waiting for %s\n", aap->pid, aap->urc.code);
-    mutex_unlock(&aap->cond_mutex);
-    printf("aap->state %d\n", aap->state);
+        thread_sleep();
     if (aap->state != R_DONE)
         return -1;
     else 
         return 0;
 }
 
-static void _async_null_cb(void *async_at, void *arg, const char *code) {
-    printf("Async_null_CB on '%s'\n", code);
+static void _async_null_cb(void *async_at, __attribute__((unused)) void *arg, __attribute__((unused)) const char *code) {
     async_at_t *aap = (async_at_t *) async_at;
-    (void) code;
-    (void) arg;
-
     aap->state = R_DONE;
 }
 
@@ -190,17 +157,14 @@ static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, cons
     int res;
 
     _async_at_setup(&async_at, _async_null_cb, NULL, resp, timeout);
+    async_at.cmd = command;
     SIM_LOCK();
     at_drain(dev);
     printf("Send '%s' wait for '%s'\n", command, async_at.urc.code);
     at_send_bytes(dev, command, strlen(command));
     at_send_bytes(dev, CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
-
-    //res = at_send_cmd(dev, command, timeout);
     SIM_UNLOCK();
-    //if (res == 0) 
-        res = _async_at_wait(&async_at);
-    printf("Stop '%s' for '%s'\n", command, async_at.urc.code);
+    res = _async_at_wait(&async_at);
     _async_at_stop(&async_at);
     return res;
 }
@@ -221,7 +185,6 @@ static uint8_t _conn_alloc(void) {
     uint8_t i;
     for (i = 0; i < SIM7020_MAX_SOCKETS; i++) {
         if (sim7020_sockets[i].recv_callback == NULL) {
-            printf("_conn_alloc %d\n", i);
             return i;
         }
     }
@@ -276,7 +239,6 @@ static xtimer_t _acttimer = {.callback = _acttimer_cb, .arg = NULL};
 
 static void _acttimer_start(void) {
     _acttimer_expired_flag = 0;
-    printf("ACTTIMER START\n");
     xtimer_set(&_acttimer, 300*1000000);
 }
 
@@ -505,7 +467,7 @@ int sim7020_status(void) {
     int res;
 
     SIM_LOCK();
-    if (1) {
+    if (0) {
         printf("Searching for operators, be patient\n");
         res = at_send_cmd_get_resp(&at_dev, "AT+COPS=?", resp, sizeof(resp), 120*1000000);
     }
@@ -580,7 +542,6 @@ int sim7020_udp_socket(const sim7020_recv_callback_t recv_callback, void *recv_c
     sock->remote = sock_udp_any;    
     sock->recv_callback = recv_callback;
     sock->recv_callback_arg = recv_callback_arg;
-    printf("sim7020_udp_socket -> %d, callback %x\n", sockid, sock->recv_callback);
     return sockid;
 #else
     int res;
@@ -620,7 +581,6 @@ static int _sock_close(uint8_t sockid) {
     int res;
     char cmd[64];
 
-    printf("_sock_close %d\n", sockid);
     assert(sockid < SIM7020_MAX_SOCKETS);
 #ifdef TCPIPSERIALS
     /* Quick close */
@@ -628,18 +588,25 @@ static int _sock_close(uint8_t sockid) {
 #else
     sprintf(cmd, "AT+CSOCL=%d", sockid);
 #endif /* TCPIPSERIALS */
-    res = at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);
+    if ((thread_getpid() == sim7020_pid)) {
+        res = at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);
+    }
+    else {
+        mutex_lock(&trans_mutex);
+        char resp[sizeof("NN, CLOSE OK")];
+        snprintf(resp, sizeof(resp), "%u, CLOSE OK", sockid);
+        res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
+        mutex_unlock(&trans_mutex);
+    }
     return res;
 }
 
 int sim7020_close(uint8_t sockid) {
 
-    SIM_LOCK();
     printf("sim7020_close %d\n", sockid);
     int res = _sock_close(sockid);
     sim7020_socket_t *sock = &sim7020_sockets[sockid];
     sock->recv_callback = NULL;
-    SIM_UNLOCK();
     return res;
 }
 
@@ -921,6 +888,7 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
         async_at_t async_at;
         snprintf(cmd, sizeof(cmd), "%u, SEND OK", sockid);
         _async_at_setup(&async_at, _async_null_cb, NULL, cmd, 10*1000000);
+        async_at.cmd = "<SEND>";
         res = _async_at_wait(&async_at);
         _async_at_stop(&async_at);
     }
@@ -1055,6 +1023,7 @@ int sim7020_resolve(const char *domain, char *result) {
     at_drain(&at_dev);
     SIM_UNLOCK();
 #endif
+    async_at.cmd = "<CDNSGIP>";
     _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+CDNSGIP=%s", domain);
