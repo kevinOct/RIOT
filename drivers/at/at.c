@@ -456,6 +456,41 @@ void at_process_urc(at_dev_t *dev, uint32_t timeout)
     }
     clist_foreach(&dev->urc_list, _check_urc, buf);
 }
+
+void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
+{
+    char buf[AT_BUF_SIZE];
+    int len = 0;
+
+    DEBUG("Processing URC (timeout=%" PRIu32 "us)\n", timeout);
+
+    ssize_t res;
+    /* keep reading while received data are shorter than EOL */
+    while (1) {
+        res = isrpipe_read_timeout(&dev->isrpipe, (uint8_t *) buf+len, 1, timeout);
+
+        if (res < 0) {
+            return;
+        }
+        if (AT_PRINT_INCOMING) {
+            print(buf + len, 1);
+        }
+
+        if (buf[len] == AT_RECV_EOL_2[0]) {
+            len = 0;
+            continue;
+        }
+
+        buf[++len] = '\0';
+        if (clist_foreach(&dev->urc_list, _check_urc, buf) != NULL) {
+            return;
+        }
+        if (len == sizeof(buf)) {
+            len = 0;
+        }
+    }
+}
+
 #endif
 
 void at_dev_poweron(at_dev_t *dev)
