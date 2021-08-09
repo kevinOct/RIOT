@@ -28,6 +28,9 @@
 #define SIM7020_RECVHEX
 #define TCPIPSERIALS
 #define SIM7020_BIND_ENABLE
+
+#define ASYNC 1
+
 static at_dev_t at_dev;
 static char buf[256];
 static char resp[1024];
@@ -51,13 +54,34 @@ struct sock_sim7020 {
     sim7020_recv_callback_t recv_callback;
     void *recv_callback_arg;
 };
+
+typedef void (*async_cb_t)(void /* async_at_t */ *aap, void *arg, const char *code);
+
+struct async_at {
+    at_urc_t urc;
+    cond_t cond;
+    mutex_t cond_mutex;
+    enum {
+        R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
+    } state;
+    async_cb_t cb;
+    void *arg;
+    xtimer_t timeout_timer;
+    kernel_pid_t pid;
+};
+
+typedef struct async_at async_at_t;
+
 typedef struct sock_sim7020 sim7020_socket_t;
 
 static sim7020_netstats_t netstats;
 
 static sim7020_socket_t sim7020_sockets[SIM7020_MAX_SOCKETS];
 
-mutex_t sim7020_lock = MUTEX_INIT;
+
+mutex_t sim7020_lock = MUTEX_INIT;       /* Exclusive access to device */
+static mutex_t trans_mutex = MUTEX_INIT; /* To make request-response transactions atomic */
+
 static unsigned int mlockline, munlockline;
 //#define P(...) printf(__VA_ARGS__)
 #define P(...)
@@ -76,8 +100,113 @@ static kernel_pid_t sim7020_pid = KERNEL_PID_UNDEF;
 static int _sock_close(uint8_t sockid);
 static void *sim7020_thread(void *);
 
+static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, const char *resp, uint32_t timeout);
+
 sim7020_netstats_t *sim7020_get_netstats(void) {
     return &netstats;
+}
+
+static void _async_at_cb(void *arg, const char *code) {
+    async_at_t *aap = (async_at_t *) arg;
+
+    printf("async_at cb '%s'\n", aap->urc.code);
+    //mutex_lock(&aap->cond_mutex);
+    printf("asybc_at call callback\n");
+    aap->cb(aap, aap->arg, code);
+    printf("asybc_at return callback\n");
+    printf("callback Wakeup %d\n", aap->pid);
+    thread_wakeup(aap->pid);
+
+    //cond_signal(&aap->cond);
+    printf("asybc_at unlock  callback\n");
+    //mutex_unlock(&aap->cond_mutex);
+}
+
+static void _async_timeout_cb(void *arg)
+{
+    async_at_t *aap = (async_at_t *) arg;
+    //mutex_lock(&aap->cond_mutex);
+    printf("AAT timeout for '%s'\n", aap->urc.code);
+    aap->state = R_TIMEOUT;
+    //cond_signal(&aap->cond);
+    printf("timeout Wakeup %d\n", aap->pid);
+    thread_wakeup(aap->pid);
+    printf("Did timeout Wakeup %d\n", aap->pid);
+    //mutex_unlock(&aap->cond_mutex);
+}
+
+static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const char *code, uint32_t offset) {
+    aap->state = R_WAIT;
+    aap->cb = cb;
+    aap->arg = arg;
+    aap->pid = thread_getpid();
+
+    cond_init(&aap->cond);
+    mutex_init(&aap->cond_mutex);
+
+    aap->urc.cb = _async_at_cb;
+    aap->urc.arg = aap;
+    aap->urc.code = code;
+    at_add_urc(&at_dev, &aap->urc);
+    printf("Add URC for '%s'\n", aap->urc.code);
+
+    aap->timeout_timer.callback = _async_timeout_cb;
+    aap->timeout_timer.arg = aap;
+    xtimer_set(&aap->timeout_timer, offset);
+}
+
+static void _async_at_stop(async_at_t *aap) {
+    printf("%d: Stop for %s\n", aap->pid, aap->urc.code);
+    xtimer_remove(&aap->timeout_timer);
+    at_remove_urc(&at_dev, &aap->urc);
+}
+
+static int _async_at_wait(async_at_t *aap) {
+    printf("%d: Wait for '%s'\n", aap->pid, aap->urc.code);
+    mutex_lock(&aap->cond_mutex);
+    while (aap->state == R_WAIT)
+        //printf("WAIT WAIT\n"), cond_wait(&aap->cond, &aap->cond_mutex);
+        printf("WAIT WAIT\n"), thread_sleep();
+    printf("%d: done waiting for %s\n", aap->pid, aap->urc.code);
+    mutex_unlock(&aap->cond_mutex);
+    printf("aap->state %d\n", aap->state);
+    if (aap->state != R_DONE)
+        return -1;
+    else 
+        return 0;
+}
+
+static void _async_null_cb(void *async_at, void *arg, const char *code) {
+    printf("Async_null_CB on '%s'\n", code);
+    async_at_t *aap = (async_at_t *) async_at;
+    (void) code;
+    (void) arg;
+
+    aap->state = R_DONE;
+}
+
+static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, const char *resp, uint32_t timeout) {
+    async_at_t async_at;
+    int res;
+
+    _async_at_setup(&async_at, _async_null_cb, NULL, resp, timeout);
+    SIM_LOCK();
+    at_drain(dev);
+    printf("Send '%s' wait for '%s'\n", command, async_at.urc.code);
+    at_send_bytes(dev, command, strlen(command));
+    at_send_bytes(dev, CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
+
+    //res = at_send_cmd(dev, command, timeout);
+    SIM_UNLOCK();
+    //if (res == 0) 
+        res = _async_at_wait(&async_at);
+    printf("Stop '%s' for '%s'\n", command, async_at.urc.code);
+    _async_at_stop(&async_at);
+    return res;
+}
+
+int _async_at_send_cmd_wait_ok(at_dev_t *dev, const char *command, uint32_t timeout) {
+     return _async_at_send_cmd_wait_resp(dev, command, "OK", timeout);
 }
 
 #ifdef TCPIPSERIALS
@@ -188,6 +317,7 @@ static int _module_init(void) {
     res = at_send_cmd_wait_ok(&at_dev, "AT", 5000000);
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         printf("AT fail\n");
         goto ret;
     }
@@ -195,6 +325,7 @@ static int _module_init(void) {
     if (res < 0) {
         printf("CPSMS fail\n");      
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         goto ret;
     }
     /* Limit bands to speed up roaming */
@@ -219,9 +350,10 @@ static int _module_init(void) {
     res = at_send_cmd_wait_ok(&at_dev, "AT+CSORCVFLAG=1", 5000000);
 #endif /* TCPIPSERIALS */
 #endif /* SIM7020_RECVHEX */
-    if (res < 0)
+    if (res < 0) {
         netstats.commfail_count++;
-
+        printf("%d: COMMFAIL\n", __LINE__);
+    }
     /* Signal Quality Report */
     res = at_send_cmd_get_resp(&at_dev, "AT+CSQ", resp, sizeof(resp), 10*1000000);
 
@@ -261,6 +393,7 @@ int sim7020_register(void) {
     res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*1000000);
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         SIM_UNLOCK();
         return res;
     }
@@ -268,6 +401,7 @@ int sim7020_register(void) {
     while (!_acttimer_expired()) {
         res = at_send_cmd_get_resp(&at_dev, "AT+CREG?", resp, sizeof(resp), 120*1000000);
         if (res < 0) {
+        printf("%d: COMMFAIL\n", __LINE__);
             netstats.commfail_count++;
         }
         else {
@@ -293,8 +427,10 @@ int sim7020_register(void) {
             if (0 == (strcmp(resp, "+CGATT: 1")))
                 break;
         }
-        else
+        else {
             netstats.commfail_count++;
+            printf("%d: COMMFAIL\n", __LINE__);
+        }
         xtimer_sleep(5);
         res = 0;
     }
@@ -317,6 +453,7 @@ int sim7020_activate(void) {
     res = at_send_cmd_get_resp(&at_dev,"AT+CIPMUX?", resp, sizeof(resp), 120*1000000);  
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         goto ret;
     }
     at_drain(&at_dev);
@@ -325,6 +462,7 @@ int sim7020_activate(void) {
         res = at_send_cmd_wait_ok(&at_dev,"AT+CIPMUX=1", 120*1000000);
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         printf("CIPMUX=1 fail %d\n", res); 
         goto ret;
     }
@@ -340,6 +478,7 @@ int sim7020_activate(void) {
         res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*1000000);  
         if (res < 0) {
             netstats.commfail_count++;
+            printf("%d: COMMFAIL\n", __LINE__);
             goto ret;
         }
     }
@@ -403,6 +542,7 @@ int sim7020_imsi(char *buf, int len) {
     int res = at_send_cmd_get_resp(&at_dev, "AT+CIMI", resp, sizeof(resp), 10*1000000);
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         return 0;
     }
     else {
@@ -418,6 +558,7 @@ int sim7020_imei(char *buf, int len) {
     int res = at_send_cmd_get_resp(&at_dev, "AT+GSN", resp, sizeof(resp), 10*1000000);
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         return 0;
     }
     else {
@@ -466,6 +607,7 @@ int sim7020_udp_socket(const sim7020_recv_callback_t recv_callback, void *recv_c
     else {
         printf("CSOC failed: %d\n", res);
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         at_drain(&at_dev);
         _module_reset();
     }        
@@ -525,6 +667,13 @@ int _sock_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
     c += strlen(c);
     snprintf(c, len, ",%u", remote->port);
     /* Create a socket: IPv4, UDP, 1 */
+#if ASYNC
+    char resp[sizeof("NN, CONNECT OK")];
+    snprintf(resp, sizeof(resp), "%u, CONNECT OK", sockid);
+    /* Should perhaps also check for "ALREADY CONNECT" */
+    mutex_lock(&trans_mutex);
+    res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
+#else
     SIM_LOCK();
     res = at_send_cmd(&at_dev, cmd, 10*1000000);
     while (1) {
@@ -539,6 +688,8 @@ int _sock_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
         }
     }
     SIM_UNLOCK();
+#endif
+    mutex_unlock(&trans_mutex);
     if (res < 0) {
         return res;
     }
@@ -609,6 +760,7 @@ int sim7020_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
     SIM_UNLOCK();
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         _module_reset();
     }
     return res;
@@ -624,14 +776,27 @@ static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
 
     int res;
     char cmd[64];
+
+    mutex_lock(&trans_mutex);
 #ifdef TCPIPSERIALS    
     snprintf(cmd, sizeof(cmd), "AT+CLPORT=%hu,\"UDP\",%hu",sockid, local->port);
+#if ASYNC
+    res = _async_at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);    
+#else
     SIM_LOCK();
     res = at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);
     SIM_UNLOCK();
+#endif
+    mutex_unlock(&trans_mutex);
+
     if (res < 0) {
         return res;
     }
+
+    mutex_lock(&trans_mutex);
+#if ASYNC
+    res = _async_at_send_cmd_wait_ok(&at_dev, "AT+CLPORT?", 10*1000000);    
+#else
     SIM_LOCK();
     at_drain(&at_dev);
     res = at_send_cmd(&at_dev, "AT+CLPORT?", 10*1000000);
@@ -639,6 +804,8 @@ static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
         res = at_readline(&at_dev, resp, sizeof(resp), 0, 10*1000000);
     } while (res >= 0 && strcmp(resp, "OK") != 0);
     SIM_UNLOCK();
+#endif
+    mutex_unlock(&trans_mutex);
     return 0;
 #else
     int res;
@@ -725,8 +892,6 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
         sock->flags &= ~MODULE_OOS;
     }
 
-    SIM_LOCK();
-    at_drain(&at_dev);
 #ifdef TCPIPSERIALS
 
     snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u,%u", sockid, len);
@@ -734,18 +899,38 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
 #else
     snprintf(cmd, sizeof(cmd), "AT+CSODSEND=%d,%d", sockid, len);
 #endif
+    mutex_lock(&trans_mutex);
+#if ASYNC
+    res = _async_at_send_cmd_wait_resp(&at_dev, cmd, "> ", 10*1000000);
+    SIM_LOCK();
+#else
+    SIM_LOCK();
+    at_drain(&at_dev);
     res = at_send_cmd(&at_dev, cmd, 10*1000000);
     res = at_expect_bytes(&at_dev, "> ", 10*1000000);
+#endif
     if (res != 0) {
         SIM_UNLOCK();
         goto fail;
     }
 #ifdef TCPIPSERIALS
+#if ASYNC
+    at_send_bytes(&at_dev, (char *) data, len);
+    SIM_UNLOCK();
+    {
+        async_at_t async_at;
+        snprintf(cmd, sizeof(cmd), "%u, SEND OK", sockid);
+        _async_at_setup(&async_at, _async_null_cb, NULL, cmd, 10*1000000);
+        res = _async_at_wait(&async_at);
+        _async_at_stop(&async_at);
+    }
+#else
     at_send_bytes(&at_dev, (char *) data, len);
     do {
         res = at_readline(&at_dev, resp, sizeof(resp), 0, 10*1000000);
     } while (res >= 0 && strstr(resp, "SEND OK") == NULL);
     SIM_UNLOCK();
+#endif
     if (res >= 0) {
         res = len;
         netstats.tx_success++;
@@ -778,8 +963,10 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
 fail:
     netstats.tx_failed++;
     netstats.commfail_count++;
+    printf("%d: COMMFAIL\n", __LINE__);
     _module_reset();
 out:
+    mutex_unlock(&trans_mutex);
     return res;
 
 }
@@ -790,37 +977,20 @@ static cond_t resolve_cond;
 static mutex_t resolve_cond_mutex;
 static uint8_t resolve_state;
 
-typedef void (*async_cb_t)(void /* async_at_t */ *aap, void *arg, const char *code);
-
-struct async_at {
-    at_urc_t urc;
-    cond_t cond;
-    mutex_t cond_mutex;
-    enum {
-        R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
-    } state;
-    async_cb_t cb;
-    void *arg;
-    xtimer_t timeout_timer;
-};
-
-typedef struct async_at async_at_t;
-
-static void _async_at_cb(void *arg, const char *code) {
-    async_at_t *aap = (async_at_t *) arg;
-
-    mutex_lock(&aap->cond_mutex);
-    aap->cb(aap, aap->arg, code);
-    cond_signal(&aap->cond);
-    mutex_unlock(&aap->cond_mutex);
-}
+#define URC_POLL_MSECS 100
 
 static void _async_resolve_cb(void *async_at, void *arg, const char *code) {
     async_at_t *aap = (async_at_t *) async_at;
     char *result = arg;
     const char *resp = code;
 
+#if ASYNC
+    char buf[64];
+    at_readline(&at_dev, buf, sizeof(buf), true, URC_POLL_MSECS*(uint32_t) 1000);
+    if (1 == sscanf(buf, " 1,\"%*[^\"]\",\"%[^\"]", result)) {
+#else
     if (1 == sscanf(resp, "+CDNSGIP: 1,\"%*[^\"]\",\"%[^\"]", result)) {
+#endif
         aap->state = R_DONE;
     }
     else {
@@ -832,20 +1002,6 @@ static void _async_resolve_cb(void *async_at, void *arg, const char *code) {
     }
 }
 
-static void _async_ok_cb(void *async_at, void *arg, const char *code) {
-    async_at_t *aap = (async_at_t *) async_at;
-    const char *resp = code;
-    (void) arg;
-
-    if (0 == strncmp(resp, "OK", sizeof("OK")-1)) {
-        aap->state = R_DONE;
-    }
-    else {
-        aap->state = R_ERROR;
-    }
-}
-
-
 /*
  * URC callback for a response like: +CDNSGIP: 1,"lab-pc.ssvl.kth.se","192.16.125.232" 
  * Argument arg is pointer to char buffer where lookup result should be stored. 
@@ -854,6 +1010,7 @@ void _resolve_urc_cb(void *arg, const char *code) {
     char *result = arg;
     const char *resp = code;
 
+    printf("Resolve URC cb on '%s'\n", code);
     mutex_lock(&resolve_cond_mutex);
     if (1 == sscanf(resp, "+CDNSGIP: 1,\"%*[^\"]\",\"%[^\"]", result)) {
         resolve_state = R_DONE;
@@ -869,7 +1026,7 @@ void _resolve_urc_cb(void *arg, const char *code) {
     mutex_unlock(&resolve_cond_mutex);
 }
 
-void _resolve_timeout_cb(void *arg)
+static void _resolve_timeout_cb(void *arg)
 {
     (void) arg;
     mutex_lock(&resolve_cond_mutex);
@@ -877,57 +1034,6 @@ void _resolve_timeout_cb(void *arg)
     resolve_state = R_TIMEOUT;
     cond_signal(&resolve_cond);
     mutex_unlock(&resolve_cond_mutex);
-}
-
-static void _async_timeout_cb(void *arg)
-{
-    async_at_t *aap = (async_at_t *) arg;
-    mutex_lock(&aap->cond_mutex);
-    printf("AAT timeout\n");
-    aap->state = R_TIMEOUT;
-    cond_signal(&aap->cond);
-    mutex_unlock(&aap->cond_mutex);
-}
-
-static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const char *code, uint32_t offset) {
-    aap->state = R_WAIT;
-    aap->urc.cb = _async_at_cb;
-    aap->urc.arg = aap;
-    aap->urc.code = code;
-    aap->cb = cb;
-    aap->arg = arg;
-
-    at_add_urc(&at_dev, &aap->urc);
-    aap->timeout_timer.callback = _async_timeout_cb;
-    xtimer_set(&aap->timeout_timer, offset);
-}
-
-static void _async_at_stop(async_at_t *aap) {
-    xtimer_remove(&aap->timeout_timer);
-    at_remove_urc(&at_dev, &aap->urc);
-}
-
-static int _async_at_wait(async_at_t *aap) {
-    mutex_lock(&aap->cond_mutex);
-    while (aap->state == R_WAIT)
-        cond_wait(&aap->cond, &aap->cond_mutex);
-    mutex_unlock(&aap->cond_mutex);
-    if (aap->state != R_DONE)
-        return -1;
-    else 
-        return 0;
-}
-
- int _async_at_send_cmd_wait_ok(at_dev_t *dev, const char *command, uint32_t timeout) {
-    async_at_t async_at;
-    int res;
-
-    _async_at_setup(&async_at, _async_ok_cb, NULL, "OK", timeout);
-    res = at_send_cmd(dev, command, timeout);
-    if (res == 0) 
-        res = _async_at_wait(&async_at);
-    _async_at_stop(&async_at);
-    return res;
 }
 
 
@@ -941,22 +1047,28 @@ int sim7020_resolve(const char *domain, char *result) {
     /* Only one at a time */
     mutex_lock(&resolve_mutex); 
 
-    _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
-
+#if 0
     SIM_LOCK();
     /* Check signal quality */
     (void) at_send_cmd_wait_ok(&at_dev, "AT+CSQ", 10*1000000);
-    (void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
-
+    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
+    at_drain(&at_dev);
     SIM_UNLOCK();
-
+#endif
+    _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+CDNSGIP=%s", domain);
+#if ASYNC
+    res = _async_at_send_cmd_wait_ok(&at_dev, cmd, 6*1000000);
+#else
     SIM_LOCK();
     res = at_send_cmd_wait_ok(&at_dev, cmd, 120*1000000);
+    printf("send OK -> %d\n", res);
     SIM_UNLOCK();
+#endif
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         _module_reset();
         goto out;
     }
@@ -1001,6 +1113,7 @@ int xsim7020_resolve(const char *domain, char *result) {
     SIM_UNLOCK();
     if (res < 0) {
         netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
         _module_reset();
         goto out;
     }
@@ -1034,9 +1147,22 @@ static void _receive_cb(void *arg, const char *code) {
     uint8_t sockid;
     uint16_t len;
     int res;
+
+    /*
+     * Process something like "+RECEIVE,0,14,192.16.125.232:10000"
+     */
+#if ASYNC
+    (void) code; /* Matched with "+RECEIVE," */
+    char buf[64];
+    at_readline(&at_dev, buf, sizeof(buf), 0, URC_POLL_MSECS*(uint32_t) 1000);
+    res = sscanf(buf, "%" SCNu8 ",%" SCNu16 ",%" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8 ":%" SCNu16,
+                 &sockid, &len,
+                 &v4addr->u8[0], &v4addr->u8[1], &v4addr->u8[2], &v4addr->u8[3], &remote.port);
+#else
     res = sscanf(code, "+RECEIVE,%" SCNu8 ",%" SCNu16 ",%" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8 ":%" SCNu16,
                  &sockid, &len,
                  &v4addr->u8[0], &v4addr->u8[1], &v4addr->u8[2], &v4addr->u8[3], &remote.port);
+#endif
     if (res == 7) {
 #ifdef SIM7020_RECVHEX
         res = at_readline(&at_dev, (char *) recv_buf, sizeof(recv_buf), 0, 10*1000000);
@@ -1151,7 +1277,6 @@ static void _csonmi_cb(void *arg, const char *code) {
 
 #endif /* TCPIPSERIALS */
 
-#define URC_POLL_MSECS 100
 static void _recv_loop(void) {
     at_urc_t urc;
 
@@ -1165,8 +1290,14 @@ static void _recv_loop(void) {
     urc.arg = NULL;
     at_add_urc(&at_dev, &urc);
     while (status.state == AT_RADIO_STATE_ACTIVE) {
+        void at_process_urc_byte(at_dev_t *dev, uint32_t timeout);
+
         SIM_LOCK();
+#if ASYNC
+        at_process_urc_byte(&at_dev, URC_POLL_MSECS*(uint32_t) 1000);
+#else
         at_process_urc(&at_dev, URC_POLL_MSECS*(uint32_t) 1000);
+#endif
         SIM_UNLOCK();
     }
     at_remove_urc(&at_dev, &urc);
