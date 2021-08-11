@@ -104,7 +104,6 @@ sim7020_netstats_t *sim7020_get_netstats(void) {
 
 static void _async_at_cb(void *arg, const char *code) {
     async_at_t *aap = (async_at_t *) arg;
-    printf("\nAAT callback '%s' for '%s'\n", aap->cmd, aap->urc.code);
     aap->cb(aap, aap->arg, code);
     thread_wakeup(aap->pid);
 }
@@ -112,7 +111,6 @@ static void _async_at_cb(void *arg, const char *code) {
 static void _async_timeout_cb(void *arg)
 {
     async_at_t *aap = (async_at_t *) arg;
-    printf("AAT timeout '%s' for '%s'\n", aap->cmd, aap->urc.code);
     aap->state = R_TIMEOUT;
     thread_wakeup(aap->pid);
 }
@@ -160,7 +158,6 @@ static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, cons
     async_at.cmd = command;
     SIM_LOCK();
     at_drain(dev);
-    printf("Send '%s' wait for '%s'\n", command, async_at.urc.code);
     at_send_bytes(dev, command, strlen(command));
     at_send_bytes(dev, CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
     SIM_UNLOCK();
