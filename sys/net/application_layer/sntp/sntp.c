@@ -67,12 +67,16 @@ int sntp_sync(sock_udp_ep_t *server, uint32_t timeout)
         return result;
     }
     sock_udp_close(&_sntp_sock);
-    mutex_lock(&_sntp_mutex);
-    _sntp_offset = (((int64_t)byteorder_ntohl(_sntp_packet.transmit.seconds)) * US_PER_SEC) +
-                   ((((int64_t)byteorder_ntohl(_sntp_packet.transmit.fraction)) * 232)
-                   / 1000000) - xtimer_now_usec64();
-    mutex_unlock(&_sntp_mutex);
-    return 0;
+    if (byteorder_ntohl(_sntp_packet.transmit.seconds) > 0) {
+        mutex_lock(&_sntp_mutex);
+        _sntp_offset = (((int64_t)byteorder_ntohl(_sntp_packet.transmit.seconds)) * US_PER_SEC) +
+                       ((((int64_t)byteorder_ntohl(_sntp_packet.transmit.fraction)) * 232)
+                       / 1000000) - xtimer_now_usec64();
+        mutex_unlock(&_sntp_mutex);
+        return 0;
+    }
+    else
+        return -1;
 }
 
 int64_t sntp_get_offset(void)
