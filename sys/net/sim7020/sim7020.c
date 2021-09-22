@@ -68,6 +68,7 @@ struct async_at {
     void *arg;
     xtimer_t timeout_timer;
     kernel_pid_t pid;
+    uint8_t seqno; /* debugging */
 };
 typedef struct async_at async_at_t;
 
@@ -104,6 +105,7 @@ sim7020_netstats_t *sim7020_get_netstats(void) {
 
 static void _async_at_cb(void *arg, const char *code) {
     async_at_t *aap = (async_at_t *) arg;
+    xtimer_remove(&aap->timeout_timer);
     aap->cb(aap, aap->arg, code);
     thread_wakeup(aap->pid);
 }
@@ -111,6 +113,7 @@ static void _async_at_cb(void *arg, const char *code) {
 static void _async_timeout_cb(void *arg)
 {
     async_at_t *aap = (async_at_t *) arg;
+    printf("AAT timeout on %d '%s' waiting for '%s'\n", aap->seqno, aap->cmd, aap->urc.code);
     aap->state = R_TIMEOUT;
     thread_wakeup(aap->pid);
 }
@@ -120,7 +123,11 @@ static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const cha
     aap->cb = cb;
     aap->arg = arg;
     aap->pid = thread_getpid();
-
+    aap->cmd = NULL;
+    {
+        static int seqno = 0;
+        aap->seqno = seqno++;
+    }
     aap->urc.cb = _async_at_cb;
     aap->urc.arg = aap;
     aap->urc.code = code;
@@ -129,6 +136,7 @@ static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const cha
     aap->timeout_timer.callback = _async_timeout_cb;
     aap->timeout_timer.arg = aap;
     xtimer_set(&aap->timeout_timer, offset);
+    printf("AAT %d for '%s'\n", aap->seqno, aap->urc.code);
 }
 
 static void _async_at_stop(async_at_t *aap) {
@@ -139,8 +147,10 @@ static void _async_at_stop(async_at_t *aap) {
 static int _async_at_wait(async_at_t *aap) {
     while (aap->state == R_WAIT)
         thread_sleep();
-    if (aap->state != R_DONE)
+    if (aap->state != R_DONE) {
+        printf("AA_WAIT state %d\n", (int) aap->state);
         return -1;
+    }
     else 
         return 0;
 }
@@ -835,6 +845,7 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
     res = _async_at_send_cmd_wait_resp(&at_dev, cmd, "> ", 10*1000000);
     if (res != 0) {
         SIM_UNLOCK();
+        printf("AA sendwait fail: %d\n", res);
         goto fail;
     }
 #ifdef TCPIPSERIALS
@@ -856,6 +867,7 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
         netstats.tx_bytes += datalen;
         goto out;
     }
+    printf("res %d\n", res);
     /* else fall through */
 #else
     SIM_LOCK();
