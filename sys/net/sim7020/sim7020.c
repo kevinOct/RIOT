@@ -177,7 +177,7 @@ static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, cons
 }
 
 int _async_at_send_cmd_wait_ok(at_dev_t *dev, const char *command, uint32_t timeout) {
-     return _async_at_send_cmd_wait_resp(dev, command, "OK", timeout);
+    return _async_at_send_cmd_wait_resp(dev, command, "OK", timeout);
 }
 
 #ifdef TCPIPSERIALS
@@ -1099,6 +1099,14 @@ static void _csonmi_cb(void *arg, const char *code) {
 
 #endif /* TCPIPSERIALS */
 
+static int led(int on) {
+    if (on)
+        LED0_ON;
+    else
+        LED0_OFF;
+    return on;
+}
+
 static void _recv_loop(void) {
     at_urc_t urc;
 
@@ -1111,35 +1119,50 @@ static void _recv_loop(void) {
 #endif 
     urc.arg = NULL;
     at_add_urc(&at_dev, &urc);
+    int ledon = 0;
     while (status.state == AT_RADIO_STATE_ACTIVE) {
         void at_process_urc_byte(at_dev_t *dev, uint32_t timeout);
 
+        ledon = led(!ledon);
         SIM_LOCK();
-        at_process_urc_byte(&at_dev, URC_POLL_MSECS*(uint32_t) 1000);
+        at_process_urc_byte(&at_dev, 2*URC_POLL_MSECS*(uint32_t) 1000);
         SIM_UNLOCK();
     }
     at_remove_urc(&at_dev, &urc);
 }
 
 
+static void blink(int blinks) {
+    led(0);
+    for (int i = 0; i < blinks; i++) {
+        led(1);
+        xtimer_usleep(US_PER_SEC/5);
+        led(0);
+        xtimer_usleep(US_PER_SEC/5);
+    }
+}
 static void *sim7020_thread(void *arg) {
     (void) arg;
 
     while (1) {
         switch (status.state) {
         case AT_RADIO_STATE_NONE:
+            blink(1);
             _acttimer_start();
             status.state = AT_RADIO_STATE_INIT;
             break;
         case AT_RADIO_STATE_INIT:
+            blink(2);
             printf("***module init:\n");
             _module_init();
             break;
         case AT_RADIO_STATE_IDLE:
+            blink(3);
             printf("***register:\n");
             sim7020_register();
             break;
         case AT_RADIO_STATE_REGISTERED:
+            blink(4);
             printf("***activate:\n");
             sim7020_activate();
             if (status.state == AT_RADIO_STATE_ACTIVE) {
