@@ -31,6 +31,8 @@
 
 #define ASYNC 1
 
+#define FORCE_OPERATOR
+
 static at_dev_t at_dev;
 static char buf[256];
 static char resp[1024];
