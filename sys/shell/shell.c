@@ -483,3 +483,9 @@ void shell_run_once(const shell_command_t *shell_commands,
         print_prompt();
     }
 }
+
+#ifdef REMOTE_COMMAND
+void remote_command_str(const shell_command_t *shell_commands, char *str) {
+    handle_input_line(shell_commands, str);
+}
+#endif /* REMOTE_COMMAND */
