@@ -31,7 +31,7 @@
 #include "net/mqttsn.h"
 #include "emcute_internal.h"
 
-#define ENABLE_DEBUG        (0)
+#define ENABLE_DEBUG        (1)
 #include "debug.h"
 
 #define PROTOCOL_VERSION    (0x01)
@@ -160,6 +160,8 @@ static void on_publish(size_t len, size_t pos)
     emcute_sub_t *sub;
     uint16_t tid = byteorder_bebuftohs(&rbuf[pos + 2]);
 
+    printf("on_publish\n");
+
     /* allocate a response packet */
     uint8_t buf[7] = { 7, PUBACK, 0, 0, 0, 0, ACCEPT };
     /* and populate message ID and topic ID fields */
@@ -167,7 +169,10 @@ static void on_publish(size_t len, size_t pos)
 
     /* return error code in case we don't support/understand active flags. So
      * far we only understand QoS 1... */
-    if (rbuf[pos + 1] & ~(EMCUTE_QOS_1 | EMCUTE_TIT_SHORT)) {
+    /* Also understand RETAIN flag */
+    if (rbuf[pos + 1] & ~(EMCUTE_RETAIN | EMCUTE_QOS_1 | EMCUTE_TIT_SHORT)) {
+      /* don't understand 10 */
+      printf("don't understand %x\n", rbuf[pos+1]);
         buf[6] = REJ_NOTSUP;
         sock_udp_send(&sock, &buf, 7, &gateway);
         return;
