@@ -40,6 +40,15 @@ typedef struct {
     uint32_t activation_fail_count;    
 } sim7020_netstats_t;
 
+enum sim_model_id {
+    M_SIM7000G,
+    M_SIM7020E,
+    M_UNKNOWN
+} ;
+typedef enum sim_model_id sim_model_id_t;
+
+extern sim_model_id_t sim_model;
+
 typedef void (* sim7020_recv_callback_t)(void *, const uint8_t *data, uint16_t datalen);
 
 int sim7020_init(void);

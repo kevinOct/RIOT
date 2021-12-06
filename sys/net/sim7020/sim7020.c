@@ -47,6 +47,8 @@ static struct at_radio_status {
     } state;
 } status = { .state = AT_RADIO_STATE_NONE}; 
 
+sim_model_id_t sim_model;
+
 struct sock_sim7020 {
     uint8_t sockid;
     uint8_t flags;
@@ -83,10 +85,17 @@ mutex_t sim7020_lock = MUTEX_INIT;       /* Exclusive access to device */
 static mutex_t trans_mutex = MUTEX_INIT; /* To make request-response transactions atomic */
 
 static unsigned int mlockline, munlockline;
-//#define P(...) printf(__VA_ARGS__)
-#define P(...)
-#define SIM_LOCK() {P("LOCK %d: 0x%x\n", __LINE__, sim7020_lock.queue.next); mlockline=__LINE__;mutex_lock(&sim7020_lock);}
-#define SIM_UNLOCK() {P("UNLOCK %d\n", __LINE__); munlockline=__LINE__;mutex_unlock(&sim7020_lock);}
+#define P(...) printf(__VA_ARGS__)
+//#define P(...)
+//#define SIM_LOCK() {P("LOCK<%d> %d: 0x%x\n", thread_getpid(), __LINE__, sim7020_lock.queue.next); mlockline=__LINE__;mutex_lock(&sim7020_lock);}
+//#define SIM_UNLOCK() {P("UNLOCK<%d> %d\n", thread_getpid(), __LINE__); munlockline=__LINE__;mutex_unlock(&sim7020_lock);}
+#define SIM_LOCK() {mutex_lock(&sim7020_lock);}
+#define SIM_UNLOCK() {mutex_unlock(&sim7020_lock);}
+
+//#define TRANS_LOCK() {P("TLOCK<%d> %d: 0x%x\n", thread_getpid(), __LINE__, trans_mutex.queue.next); mlockline=__LINE__;mutex_lock(&trans_mutex);}
+//#define TRANS_UNLOCK() {P("TUNLOCK<%d> %d\n", thread_getpid(), __LINE__); munlockline=__LINE__;mutex_unlock(&trans_mutex);}
+#define TRANS_LOCK() {mutex_lock(&trans_mutex);}
+#define TRANS_UNLOCK() {mutex_unlock(&trans_mutex);}
 
 /* at_process_urc() allocates line buffer on stack, 
  * so make sure there is room for it
@@ -208,13 +217,20 @@ uint64_t sim7020_prev_active_duration_usecs; /* How long previous activation las
 
 int sim7020_init(void) {
 
-    sim7020_powerkey_init();
-    sim7020_power_off();    
     int res = at_dev_init(&at_dev, SIM7020_UART_DEV, SIM7020_BAUDRATE, buf, sizeof(buf));
     if (res != UART_OK) {
         printf("Error initialising AT dev %d speed %d\n", SIM7020_UART_DEV, SIM7020_BAUDRATE);
         return res;
     }
+
+    sim7020_powerkey_init();
+
+    //sim7020_power_off();    
+    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
+    printf("wait for powdon\n");
+    sim7020_power_on();
+    xtimer_sleep(5);
+    res = at_send_cmd_wait_ok(&at_dev, "AT", 6*US_PER_SEC);
     //at_dev_poweron(&at_dev);
     
     if (pid_is_valid(sim7020_pid)) {
@@ -264,7 +280,14 @@ static int _acttimer_expired(void) {
  * Reset module by powering it off 
  */
 static void _module_reset(void) {
-    sim7020_power_off();    
+    if (sim_model == M_SIM7000G) {
+        printf("power fown\n");
+        //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
+        printf("Waitin\n");
+    }
+    else
+        sim7020_power_off();    
+
     _conn_invalidate();
     netstats.reset_count++;
     status.state = AT_RADIO_STATE_NONE;
@@ -283,8 +306,9 @@ static int _module_init(void) {
 
     int res;
     SIM_LOCK();
-    res = at_send_cmd_wait_ok(&at_dev, "AT+RESET", 5000000);
+    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
     /* Ignore */
+    
     res = at_send_cmd_wait_ok(&at_dev, "AT", 5000000);
     if (res < 0) {
         netstats.commfail_count++;
@@ -299,6 +323,23 @@ static int _module_init(void) {
         printf("%d: COMMFAIL\n", __LINE__);
         goto ret;
     }
+
+    /* Request Model Identification */
+    char resp[32];
+    res = at_send_cmd_get_resp(&at_dev, "AT+CGMM", resp, sizeof(resp), 10*US_PER_SEC);
+    
+    printf("Model %s\n", resp);
+    if (strcmp(resp, "SIM7020E") == 0) {
+        sim_model = M_SIM7020E;
+    }
+    else if (strcmp(resp, "SIMCOM_SIM7000G") == 0) {
+        sim_model = M_SIM7000G;
+    }
+    else {
+        printf("Model unknown: \"%s\"\n", resp);
+        sim_model = M_UNKNOWN;
+    }
+    
     /* Limit bands to speed up roaming */
     /* WIP needs a generic solution */
     //res = at_send_cmd_wait_ok(&at_dev, "AT+CBAND=20", 5000000);
@@ -334,6 +375,15 @@ static int _module_init(void) {
         _sock_close(i);
     }
     res = at_send_cmd_wait_ok(&at_dev, "AT+IPR?", 5000000);
+    if (sim_model == M_SIM7000G) {
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CNMP=38", 5000000);
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=?", 5000000);
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB?", 5000000);
+        /* NB-IOT */
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=2", 5000000);
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CBANDCFG=\"NB-IOT\",1,3,5,8,20,28", 5000000);
+    }
+
     status.state = AT_RADIO_STATE_IDLE;
 ret:
     SIM_UNLOCK();
@@ -439,13 +489,24 @@ int sim7020_activate(void) {
     }
     at_drain(&at_dev);
 
+    if (sim_model == M_SIM7000G) {
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
+        res = at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
+        printf("response %s\n", resp);
+    }
     /* Set APN and activate */
     res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
     /* Already activated? */
-    if (res > 0 && strncmp("+CSTT: \"\"", resp, sizeof("+CSTT: \"\"")-1) != 0) {
-        status.state = AT_RADIO_STATE_ACTIVE;
+    if (res > 0) {
+	char apn[32];
+	if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
+            if (strncmp(apn, APN, sizeof(APN)) == 0)
+                status.state = AT_RADIO_STATE_ACTIVE;
+            else
+                printf("Not APN %s\n", APN);
+	}
     }
-    else {
+    if (status.state != AT_RADIO_STATE_ACTIVE) {
         res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*1000000);  
         if (res < 0) {
             netstats.commfail_count++;
@@ -462,7 +523,11 @@ int sim7020_activate(void) {
         status.state = AT_RADIO_STATE_ACTIVE;
         break;
       }
+      res = at_send_cmd_wait_ok(&at_dev, "AT+CIPSTATUS", 5*US_PER_SEC);
     }
+    res = at_send_cmd_wait_ok(&at_dev, "AT+CIFSR", 5000000);    
+    //res = at_send_cmd_wait_ok(&at_dev, "AT+CIPPING=\"192.16.125.232\"", 5000000);
+
     /* Show Data in Hex Mode of a Package Received */
     res = at_send_cmd_wait_ok(&at_dev, "AT+CIPHEXS=2", 5000000);
     /* Show remote address and port on receive */
@@ -475,6 +540,7 @@ ret:
 int sim7020_status(void) {
     int res;
 
+    printf("SIM7020 status: %u (active == %u)\n", status.state, sim7020_active());
     SIM_LOCK();
     if (0) {
         printf("Searching for operators, be patient\n");
@@ -492,15 +558,31 @@ int sim7020_status(void) {
     /* Report Network State */
     res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*1000000);
 
+    res = at_send_cmd_wait_ok(&at_dev,"AT+CENG=1", 60*1000000);
+    /* Report Network State */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*1000000);
+
     /* Signal Quality Report */
     res = at_send_cmd_wait_ok(&at_dev,"AT+CSQ", 60*1000000);
     /* Task status, APN */
     res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
 
+    res = at_send_cmd_get_resp(&at_dev,"AT+CIPSTATUS", resp, sizeof(resp), 60*1000000);
     /* Get Local IP Address */
     res = at_send_cmd_get_resp(&at_dev,"AT+CIFSR", resp, sizeof(resp), 60*1000000);
     /* PDP Context Read Dynamic Parameters */
     res = at_send_cmd_get_resp(&at_dev,"AT+CGCONTRDP", resp, sizeof(resp), 60*1000000);
+    /* Show PDP Address */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGPADDR", resp, sizeof(resp), 60*1000000);
+    /* Define PDP Context */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGDCONT", resp, sizeof(resp), 60*1000000);
+
+    /* Request TA Model Identification */
+    res = at_send_cmd_get_resp(&at_dev,"AT+GMM", resp, sizeof(resp), 60*1000000);
+    /* Request Manufacturer Identification */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGMI", resp, sizeof(resp), 60*1000000);
+    /* Request Model Identification */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGMM", resp, sizeof(resp), 60*1000000);
     SIM_UNLOCK();
     return res;
 }
@@ -601,11 +683,11 @@ static int _sock_close(uint8_t sockid) {
         res = at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);
     }
     else {
-        mutex_lock(&trans_mutex);
+        TRANS_LOCK();
         char resp[sizeof("NN, CLOSE OK")];
         snprintf(resp, sizeof(resp), "%u, CLOSE OK", sockid);
         res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
-        mutex_unlock(&trans_mutex);
+        TRANS_UNLOCK();
     }
     return res;
 }
@@ -647,9 +729,9 @@ int _sock_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
     char resp[sizeof("NN, CONNECT OK")];
     snprintf(resp, sizeof(resp), "%u, CONNECT OK", sockid);
     /* Should perhaps also check for "ALREADY CONNECT" */
-    mutex_lock(&trans_mutex);
+    TRANS_LOCK();
     res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
-    mutex_unlock(&trans_mutex);
+    TRANS_UNLOCK();
     if (res < 0) {
         return res;
     }
@@ -737,19 +819,19 @@ static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
     int res;
     char cmd[64];
 
-    mutex_lock(&trans_mutex);
+    TRANS_LOCK();
 #ifdef TCPIPSERIALS    
     snprintf(cmd, sizeof(cmd), "AT+CLPORT=%hu,\"UDP\",%hu",sockid, local->port);
     res = _async_at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);    
-    mutex_unlock(&trans_mutex);
+    TRANS_UNLOCK();
 
     if (res < 0) {
         return res;
     }
 
-    mutex_lock(&trans_mutex);
+    TRANS_LOCK();
     res = _async_at_send_cmd_wait_ok(&at_dev, "AT+CLPORT?", 10*1000000);    
-    mutex_unlock(&trans_mutex);
+    TRANS_UNLOCK();
     return 0;
 #else
     int res;
@@ -843,7 +925,7 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
 #else
     snprintf(cmd, sizeof(cmd), "AT+CSODSEND=%d,%d", sockid, len);
 #endif
-    mutex_lock(&trans_mutex);
+    TRANS_LOCK();
     res = _async_at_send_cmd_wait_resp(&at_dev, cmd, "> ", 10*1000000);
     if (res != 0) {
         SIM_UNLOCK();
@@ -899,7 +981,7 @@ fail:
     printf("%d: COMMFAIL\n", __LINE__);
     _module_reset();
 out:
-    mutex_unlock(&trans_mutex);
+    TRANS_UNLOCK();
     return res;
 
 }
@@ -927,6 +1009,31 @@ static void _async_resolve_cb(void *async_at, void *arg, const char *code) {
     }
 }
 
+static ipv4_addr_t get_resolver(void) {
+    char buf[64];
+    ipv4_addr_t v4addr = {.u32 = 0};
+    int res;
+    res = at_send_cmd_get_resp(&at_dev, "AT+CDNSCFG?", buf, sizeof(buf), 5*US_PER_SEC);
+    at_drain(&at_dev);
+    if (res >= 0) {
+        res = sscanf(buf, "PrimaryDns: %" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8,
+                     &v4addr.u8[0], &v4addr.u8[1], &v4addr.u8[2], &v4addr.u8[3]);
+        if (res < 0)
+            printf("Resolver ail\n");
+    }
+    return v4addr;
+}
+
+static int set_resolver(ipv4_addr_t *resolveaddr) {
+    char cmd[64];
+    char v4str[sizeof("255.255.255.255")];
+    at_drain(&at_dev);
+    snprintf(cmd, sizeof(cmd), "AT+CDNSCFG=\"%s\",\"0.0.0.0\"", ipv4_addr_to_str(v4str, resolveaddr, sizeof(v4str)));
+    return at_send_cmd_wait_ok(&at_dev, cmd, 5*US_PER_SEC);
+}
+
+static ipv4_addr_t default_resolver = {.u8[0] = 8, .u8[1] = 8, .u8[2] = 8, .u8[3] = 8};
+
 int sim7020_resolve(const char *domain, char *result) {
     int res;
     async_at_t async_at;
@@ -941,10 +1048,14 @@ int sim7020_resolve(const char *domain, char *result) {
     SIM_LOCK();
     /* Check signal quality */
     (void) at_send_cmd_wait_ok(&at_dev, "AT+CSQ", 10*1000000);
-    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
     at_drain(&at_dev);
     SIM_UNLOCK();
 #endif
+    ipv4_addr_t resolveaddr = get_resolver();
+    if (resolveaddr.u32.u32 == (uint32_t) 0) {
+        set_resolver(&default_resolver);
+    }
     async_at.cmd = "<CDNSGIP>";
     _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
     char cmd[64];
