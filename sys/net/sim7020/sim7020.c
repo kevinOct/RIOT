@@ -124,7 +124,6 @@ static void _async_at_cb(void *arg, const char *code) {
 static void _async_timeout_cb(void *arg)
 {
     async_at_t *aap = (async_at_t *) arg;
-    printf("AAT timeout on %d '%s' waiting for '%s'\n", aap->seqno, aap->cmd, aap->urc.code);
     aap->state = R_TIMEOUT;
     thread_wakeup(aap->pid);
 }
@@ -147,7 +146,6 @@ static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const cha
     aap->timeout_timer.callback = _async_timeout_cb;
     aap->timeout_timer.arg = aap;
     xtimer_set(&aap->timeout_timer, offset);
-    printf("AAT %d for '%s'\n", aap->seqno, aap->urc.code);
 }
 
 static void _async_at_stop(async_at_t *aap) {
@@ -281,9 +279,11 @@ static int _acttimer_expired(void) {
  */
 static void _module_reset(void) {
     if (sim_model == M_SIM7000G) {
+        printf("Do power off\n");
+        sim7020_power_off();
+
         printf("power fown\n");
-        //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
-        printf("Waitin\n");
+        (void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
     }
     else
         sim7020_power_off();    
@@ -302,7 +302,8 @@ static void _module_reset(void) {
  * Module initialisation -- must be called with module mutex locked 
  */
 static int _module_init(void) {
-    sim7020_power_on();
+    printf("Don't do power on\n");
+    //sim7020_power_on();
 
     int res;
     SIM_LOCK();
@@ -380,8 +381,14 @@ static int _module_init(void) {
         res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=?", 5000000);
         res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB?", 5000000);
         /* NB-IOT */
-        res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=2", 5000000);
+        //res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=2", 5000000);
+        /* Cat-M */
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=1", 5000000);
         res = at_send_cmd_wait_ok(&at_dev, "AT+CBANDCFG=\"NB-IOT\",1,3,5,8,20,28", 5000000);
+
+        /* Echo mode on */
+        res = at_send_cmd_wait_ok(&at_dev, "ATE1", 500000);
+
     }
 
     status.state = AT_RADIO_STATE_IDLE;
@@ -399,11 +406,15 @@ int sim7020_reset(void) {
  */
 /* Operator MCCMNC (mobile country code and mobile network code) */
 /* Telia */
-#define OPERATOR "24001"
-#define APN "lpwa.telia.iot"
+//#define OPERATOR "24001"
+//#define APN "lpwa.telia.iot"
 /* Tre  */
 //#define OPERATOR "24002"
 //#define APN "internet"
+/* Tele2 */
+#define OPERATOR "24007"
+#define APN "4g.tele2.se"
+
 
 int sim7020_register(void) {
     int res = 0;
@@ -436,6 +447,24 @@ int sim7020_register(void) {
                 if (creg == 1 || creg == 5) {
                     status.state = AT_RADIO_STATE_REGISTERED;
                     break;
+                }
+                else if ((sim_model == M_SIM7000G) && (creg == 0)) {
+                    /* Is this for NB-IoT only, that we can't trust CREG and need to use CGREG? */
+                    res = at_send_cmd_get_resp(&at_dev, "AT+CGREG?", resp, sizeof(resp), 120*1000000);
+                    if (res < 0) {
+                        printf("%d: COMMFAIL\n", __LINE__);
+                        netstats.commfail_count++;
+                    }
+                    else {
+                        uint8_t creg;
+                        if (1 == (sscanf(resp, "%*[^:]: %*" SCNu8 ",%" SCNu8, &creg))) {
+                            /* Wait for 1 (Registered, home network) or 5 (Registered, roaming) */
+                            if (creg == 1 || creg == 5) {
+                                status.state = AT_RADIO_STATE_REGISTERED;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -490,28 +519,30 @@ int sim7020_activate(void) {
     at_drain(&at_dev);
 
     if (sim_model == M_SIM7000G) {
+        /* Skip APN, if not using GPRS */
         res = at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
         res = at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
-        printf("response %s\n", resp);
     }
-    /* Set APN and activate */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
-    /* Already activated? */
-    if (res > 0) {
-	char apn[32];
-	if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
-            if (strncmp(apn, APN, sizeof(APN)) == 0)
-                status.state = AT_RADIO_STATE_ACTIVE;
-            else
-                printf("Not APN %s\n", APN);
-	}
-    }
-    if (status.state != AT_RADIO_STATE_ACTIVE) {
-        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*1000000);  
-        if (res < 0) {
-            netstats.commfail_count++;
-            printf("%d: COMMFAIL\n", __LINE__);
-            goto ret;
+    if (1) {
+        /* Set APN and activate */
+        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
+        /* Already activated? */
+        if (res > 0) {
+            char apn[32];
+            if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
+                if (strncmp(apn, APN, sizeof(APN)) == 0)
+                    status.state = AT_RADIO_STATE_ACTIVE;
+                else
+                    printf("Not APN %s\n", APN);
+            }
+        }
+        if (status.state != AT_RADIO_STATE_ACTIVE) {
+            res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*1000000);
+            if (res < 0) {
+                netstats.commfail_count++;
+                printf("%d: COMMFAIL\n", __LINE__);
+                goto ret;
+            }
         }
     }
     at_drain(&at_dev);
