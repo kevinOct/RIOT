@@ -406,14 +406,14 @@ int sim7020_reset(void) {
  */
 /* Operator MCCMNC (mobile country code and mobile network code) */
 /* Telia */
-//#define OPERATOR "24001"
-//#define APN "lpwa.telia.iot"
+#define OPERATOR "24001"
+#define APN "lpwa.telia.iot"
 /* Tre  */
 //#define OPERATOR "24002"
 //#define APN "internet"
 /* Tele2 */
-#define OPERATOR "24007"
-#define APN "4g.tele2.se"
+//#define OPERATOR "24007"
+//#define APN "4g.tele2.se"
 
 
 int sim7020_register(void) {
