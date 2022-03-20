@@ -23,7 +23,7 @@
 #include "periph/uart.h"
 
 #include "net/sim7020.h"
-#include "net/sim7020_powerkey.h"
+//#include "net/sim7020_powerkey.h"
 
 #define SIM7020_RECVHEX
 #define TCPIPSERIALS
@@ -221,14 +221,20 @@ int sim7020_init(void) {
         return res;
     }
 
-    sim7020_powerkey_init();
+    sim7xxx_powerkey_init();
 
-    //sim7020_power_off();    
+    sim7xxx_power_off();    
     //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
+    xtimer_sleep(2);
     printf("wait for powdon\n");
-    sim7020_power_on();
+    sim7xxx_power_on();
     xtimer_sleep(5);
+    printf("Send first AT\n");
     res = at_send_cmd_wait_ok(&at_dev, "AT", 6*US_PER_SEC);
+    if (res == -1)
+        printf("No response\n");
+    else
+        printf("Got first OK\n");
     //at_dev_poweron(&at_dev);
     
     if (pid_is_valid(sim7020_pid)) {
@@ -280,13 +286,13 @@ static int _acttimer_expired(void) {
 static void _module_reset(void) {
     if (sim_model == M_SIM7000G) {
         printf("Do power off\n");
-        sim7020_power_off();
+        sim7xxx_power_off();
 
-        printf("power fown\n");
-        (void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
+        //printf("power fown\n");
+        //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
     }
     else
-        sim7020_power_off();    
+        sim7xxx_power_off();    
 
     _conn_invalidate();
     netstats.reset_count++;
@@ -302,8 +308,8 @@ static void _module_reset(void) {
  * Module initialisation -- must be called with module mutex locked 
  */
 static int _module_init(void) {
-    printf("Don't do power on\n");
-    //sim7020_power_on();
+  //printf("Don't do power on\n");
+    sim7xxx_power_on();
 
     int res;
     SIM_LOCK();
@@ -406,14 +412,14 @@ int sim7020_reset(void) {
  */
 /* Operator MCCMNC (mobile country code and mobile network code) */
 /* Telia */
-#define OPERATOR "24001"
-#define APN "lpwa.telia.iot"
+//#define OPERATOR "24001"
+//#define APN "lpwa.telia.iot"
 /* Tre  */
 //#define OPERATOR "24002"
 //#define APN "internet"
 /* Tele2 */
-//#define OPERATOR "24007"
-//#define APN "4g.tele2.se"
+#define OPERATOR "24007"
+#define APN "4g.tele2.se"
 
 
 int sim7020_register(void) {

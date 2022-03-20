@@ -47,6 +47,14 @@ enum sim_model_id {
 } ;
 typedef enum sim_model_id sim_model_id_t;
 
+#if defined(SIM7020)
+#include "net/sim7020_powerkey.h"
+#elif defined(SIM7000G)
+#include "net/sim7000g_powerkey.h"
+#else
+#error SIMCom module undefined
+#endif /* SIM7020 */
+
 extern sim_model_id_t sim_model;
 
 typedef void (* sim7020_recv_callback_t)(void *, const uint8_t *data, uint16_t datalen);
