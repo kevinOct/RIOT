@@ -42,7 +42,7 @@ static void _printprintable(char *str, int n) {
         else if (*c == '\n' || *c == '\r')
             putchar(*c);
         else
-            printf("x%02x", *c);
+            printf("x%02" PRIx8, (uint8_t) *c);
     }
 }
 
@@ -440,9 +440,10 @@ static int _check_urc(clist_node_t *node, void *arg)
     return 0;
 }
 
+static char buf[AT_BUF_SIZE];
 void at_process_urc(at_dev_t *dev, uint32_t timeout)
 {
-    char buf[AT_BUF_SIZE];
+    //char buf[AT_BUF_SIZE];
 
     DEBUG("Processing URC (timeout=%" PRIu32 "us)\n", timeout);
 
@@ -459,7 +460,7 @@ void at_process_urc(at_dev_t *dev, uint32_t timeout)
 
 void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
 {
-    char buf[AT_BUF_SIZE];
+    //static char buf[AT_BUF_SIZE];
     int len = 0;
 
     DEBUG("Processing URC (timeout=%" PRIu32 "us)\n", timeout);
@@ -468,7 +469,6 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
     /* keep reading while received data are shorter than EOL */
     while (1) {
         res = isrpipe_read_timeout(&dev->isrpipe, (uint8_t *) buf+len, 1, timeout);
-
         if (res < 0) {
             return;
         }
