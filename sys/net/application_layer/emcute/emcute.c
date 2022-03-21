@@ -31,7 +31,7 @@
 #include "net/mqttsn.h"
 #include "emcute_internal.h"
 
-#define ENABLE_DEBUG        (1)
+#define ENABLE_DEBUG        (0)
 #include "debug.h"
 
 #define PROTOCOL_VERSION    (0x01)
