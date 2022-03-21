@@ -39,6 +39,7 @@ static char resp[1024];
 
 static struct at_radio_status {
     enum {
+        AT_RADIO_STATE_RESET,
         AT_RADIO_STATE_NONE,
         AT_RADIO_STATE_INIT,
         AT_RADIO_STATE_IDLE,
@@ -215,40 +216,21 @@ uint64_t sim7020_prev_active_duration_usecs; /* How long previous activation las
 
 int sim7020_init(void) {
 
+    sim7xxx_powerkey_init();
     int res = at_dev_init(&at_dev, SIM7020_UART_DEV, SIM7020_BAUDRATE, buf, sizeof(buf));
     if (res != UART_OK) {
-        printf("Error initialising AT dev %d speed %d\n", SIM7020_UART_DEV, SIM7020_BAUDRATE);
         return res;
     }
 
-    sim7xxx_powerkey_init();
-
-    sim7xxx_power_off();    
-    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
-    xtimer_sleep(2);
-    printf("wait for powdon\n");
-    sim7xxx_power_on();
-    xtimer_sleep(5);
-    printf("Send first AT\n");
-    res = at_send_cmd_wait_ok(&at_dev, "AT", 6*US_PER_SEC);
-    if (res == -1)
-        printf("No response\n");
-    else
-        printf("Got first OK\n");
-    //at_dev_poweron(&at_dev);
-    
-    if (pid_is_valid(sim7020_pid)) {
-        printf("sim7020 thread already running\n");
-    }
-    else {
+    if (!pid_is_valid(sim7020_pid)) {
         sim7020_pid = thread_create(sim7020_stack, sizeof(sim7020_stack), SIM7020_PRIO, THREAD_CREATE_STACKTEST,
                                     sim7020_thread, NULL, "sim7020");
         if (!pid_is_valid(sim7020_pid)) {
-            printf("Could not launch sim7020: %d\n", sim7020_pid);
+            printf("launch sim7020: %d\n", sim7020_pid);
             return sim7020_pid;
         }
     }
-    status.state = AT_RADIO_STATE_NONE;
+    status.state = AT_RADIO_STATE_RESET;
     sim7020_activation_usecs = xtimer_now_usec();
     return 0;
 }
@@ -285,10 +267,7 @@ static int _acttimer_expired(void) {
  */
 static void _module_reset(void) {
     if (sim_model == M_SIM7000G) {
-        printf("Do power off\n");
         sim7xxx_power_off();
-
-        //printf("power fown\n");
         //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
     }
     else
@@ -308,26 +287,28 @@ static void _module_reset(void) {
  * Module initialisation -- must be called with module mutex locked 
  */
 static int _module_init(void) {
-  //printf("Don't do power on\n");
+    sim7xxx_power_off();
+    xtimer_sleep(2);
     sim7xxx_power_on();
-
-    int res;
+    xtimer_sleep(2);
+    int res = 0;
     SIM_LOCK();
-    //(void) at_send_cmd_wait_ok(&at_dev, "AT+CPOWD=1", 6*US_PER_SEC);
-    /* Ignore */
     
-    res = at_send_cmd_wait_ok(&at_dev, "AT", 5000000);
+    {
+        int tries = 8;
+        while (tries-- > 0)
+            if ((res = at_send_cmd_wait_ok(&at_dev, "AT", 3*US_PER_SEC)) >= 0)
+                break;
+    }
     if (res < 0) {
         netstats.commfail_count++;
-        printf("%d: COMMFAIL\n", __LINE__);
-        printf("AT fail\n");
+        printf("%d: AT COMMFAIL\n", __LINE__);
         goto ret;
     }
     res = at_send_cmd_wait_ok(&at_dev, "AT+CPSMS=0", 5000000);
     if (res < 0) {
-        printf("CPSMS fail\n");      
         netstats.commfail_count++;
-        printf("%d: COMMFAIL\n", __LINE__);
+        printf("%d: CPSMS COMMFAIL\n", __LINE__);
         goto ret;
     }
 
@@ -404,7 +385,8 @@ ret:
 }
 
 int sim7020_reset(void) {
-    _module_reset();
+    status.state = AT_RADIO_STATE_RESET;
+    //_module_reset();
     return 0;
 }
 /*
@@ -538,8 +520,6 @@ int sim7020_activate(void) {
             if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
                 if (strncmp(apn, APN, sizeof(APN)) == 0)
                     status.state = AT_RADIO_STATE_ACTIVE;
-                else
-                    printf("Not APN %s\n", APN);
             }
         }
         if (status.state != AT_RADIO_STATE_ACTIVE) {
@@ -1050,8 +1030,10 @@ static ipv4_addr_t get_resolver(void) {
     char buf[64];
     ipv4_addr_t v4addr = {.u32 = 0};
     int res;
+    SIM_LOCK();
     res = at_send_cmd_get_resp(&at_dev, "AT+CDNSCFG?", buf, sizeof(buf), 5*US_PER_SEC);
     at_drain(&at_dev);
+    SIM_UNLOCK();
     if (res >= 0) {
         res = sscanf(buf, "PrimaryDns: %" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8,
                      &v4addr.u8[0], &v4addr.u8[1], &v4addr.u8[2], &v4addr.u8[3]);
@@ -1272,7 +1254,6 @@ static void _recv_loop(void) {
     int ledon = 0;
     while (status.state == AT_RADIO_STATE_ACTIVE) {
         void at_process_urc_byte(at_dev_t *dev, uint32_t timeout);
-
         ledon = led(!ledon);
         SIM_LOCK();
         at_process_urc_byte(&at_dev, 2*URC_POLL_MSECS*(uint32_t) 1000);
@@ -1280,6 +1261,7 @@ static void _recv_loop(void) {
     }
     at_remove_urc(&at_dev, &urc);
 }
+
 
 
 static void blink(int blinks) {
@@ -1296,6 +1278,9 @@ static void *sim7020_thread(void *arg) {
 
     while (1) {
         switch (status.state) {
+        case AT_RADIO_STATE_RESET:
+            _module_reset();
+            break;
         case AT_RADIO_STATE_NONE:
             blink(1);
             _acttimer_start();
@@ -1345,23 +1330,15 @@ int sim7020_active(void) {
 int sim7020_at(const char *cmd) {
     printf("Do command '%s'\n", cmd);
     if (sim7020_lock.queue.next) {
-        printf("Warning: mutex locked on line %u (last unlock line %u)\n", mlockline, munlockline);
+        printf("Warning: mutex locked %u (last unlock %u)\n", mlockline, munlockline);
     }
-    else
-        printf("Mutex not locked\n");
-    SIM_LOCK();
+    //SIM_LOCK();
     at_send_cmd(&at_dev, cmd, 10*1000000);
-    SIM_UNLOCK();
+    //SIM_UNLOCK();
     return 0;
 }
 
-int sim7020_test(uint8_t sockid, int count) {
-    (void) sockid;
-    (void) count;
-    char buf[64];
-    int res = sim7020_resolve("lab-pc.ssvl.kth.se", buf);
-    
-    if (res == 0)
-        printf("Resolve: %s\n", buf);
+//int sim7020cmd_test(uint8_t sockid, int count) {
+int sim7020_test(void) {
     return 0;
 }
