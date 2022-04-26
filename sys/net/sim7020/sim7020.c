@@ -17,7 +17,7 @@
 #include "net/ipv6/addr.h"
 #include "net/sock/udp.h"
 
-#include "at.h"
+#include "async_at.h"
 #include "xtimer.h"
 #include "cond.h"
 #include "periph/uart.h"
@@ -33,7 +33,7 @@
 
 #define FORCE_OPERATOR
 
-static at_dev_t at_dev;
+at_dev_t at_dev;
 static char buf[256];
 static char resp[1024];
 
@@ -60,22 +60,6 @@ struct sock_sim7020 {
     void *recv_callback_arg;
 };
 typedef struct sock_sim7020 sim7020_socket_t;
-
-typedef void (*async_cb_t)(void /* async_at_t */ *aap, void *arg, const char *code);
-
-struct async_at {
-    const char *cmd;
-    at_urc_t urc;
-    enum {
-        R_WAIT, R_DONE, R_TIMEOUT, R_ERROR
-    } state;
-    async_cb_t cb;
-    void *arg;
-    xtimer_t timeout_timer;
-    kernel_pid_t pid;
-    uint8_t seqno; /* debugging */
-};
-typedef struct async_at async_at_t;
 
 static sim7020_netstats_t netstats;
 
@@ -109,85 +93,8 @@ static kernel_pid_t sim7020_pid = KERNEL_PID_UNDEF;
 static int _sock_close(uint8_t sockid);
 static void *sim7020_thread(void *);
 
-static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, const char *resp, uint32_t timeout);
-
 sim7020_netstats_t *sim7020_get_netstats(void) {
     return &netstats;
-}
-
-static void _async_at_cb(void *arg, const char *code) {
-    async_at_t *aap = (async_at_t *) arg;
-    xtimer_remove(&aap->timeout_timer);
-    aap->cb(aap, aap->arg, code);
-    thread_wakeup(aap->pid);
-}
-
-static void _async_timeout_cb(void *arg)
-{
-    async_at_t *aap = (async_at_t *) arg;
-    aap->state = R_TIMEOUT;
-    thread_wakeup(aap->pid);
-}
-
-static void _async_at_setup(async_at_t *aap, async_cb_t cb, void *arg, const char *code, uint32_t offset) {
-    aap->state = R_WAIT;
-    aap->cb = cb;
-    aap->arg = arg;
-    aap->pid = thread_getpid();
-    aap->cmd = NULL;
-    {
-        static int seqno = 0;
-        aap->seqno = seqno++;
-    }
-    aap->urc.cb = _async_at_cb;
-    aap->urc.arg = aap;
-    aap->urc.code = code;
-    at_add_urc(&at_dev, &aap->urc);
-
-    aap->timeout_timer.callback = _async_timeout_cb;
-    aap->timeout_timer.arg = aap;
-    xtimer_set(&aap->timeout_timer, offset);
-}
-
-static void _async_at_stop(async_at_t *aap) {
-    xtimer_remove(&aap->timeout_timer);
-    at_remove_urc(&at_dev, &aap->urc);
-}
-
-static int _async_at_wait(async_at_t *aap) {
-    while (aap->state == R_WAIT)
-        thread_sleep();
-    if (aap->state != R_DONE) {
-        printf("AA_WAIT state %d\n", (int) aap->state);
-        return -1;
-    }
-    else 
-        return 0;
-}
-
-static void _async_null_cb(void *async_at, __attribute__((unused)) void *arg, __attribute__((unused)) const char *code) {
-    async_at_t *aap = (async_at_t *) async_at;
-    aap->state = R_DONE;
-}
-
-static int _async_at_send_cmd_wait_resp(at_dev_t *dev, const char *command, const char *resp, uint32_t timeout) {
-    async_at_t async_at;
-    int res;
-
-    _async_at_setup(&async_at, _async_null_cb, NULL, resp, timeout);
-    async_at.cmd = command;
-    SIM_LOCK();
-    at_drain(dev);
-    at_send_bytes(dev, command, strlen(command));
-    at_send_bytes(dev, CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
-    SIM_UNLOCK();
-    res = _async_at_wait(&async_at);
-    _async_at_stop(&async_at);
-    return res;
-}
-
-int _async_at_send_cmd_wait_ok(at_dev_t *dev, const char *command, uint32_t timeout) {
-    return _async_at_send_cmd_wait_resp(dev, command, "OK", timeout);
 }
 
 #ifdef TCPIPSERIALS
@@ -250,7 +157,7 @@ static xtimer_t _acttimer = {.callback = _acttimer_cb, .arg = NULL};
 
 static void _acttimer_start(void) {
     _acttimer_expired_flag = 0;
-    xtimer_set(&_acttimer, 300*1000000);
+    xtimer_set(&_acttimer, 300*US_PER_SEC);
 }
 
 static void _acttimer_stop(void) {
@@ -295,10 +202,18 @@ static int _module_init(void) {
     SIM_LOCK();
     
     {
-        int tries = 8;
-        while (tries-- > 0)
-            if ((res = at_send_cmd_wait_ok(&at_dev, "AT", 3*US_PER_SEC)) >= 0)
+        char *ate;
+        if (IS_ACTIVE(CONFIG_AT_SEND_SKIP_ECHO)) {
+            ate = "ATE0";
+        }
+        else {
+            ate = "ATE1";
+        }
+        int tries = 30;
+        while (tries-- > 0) {
+            if ((res = at_send_cmd_wait_ok(&at_dev, ate, 1*US_PER_SEC)) >= 0)
                 break;
+        }
     }
     if (res < 0) {
         netstats.commfail_count++;
@@ -309,7 +224,8 @@ static int _module_init(void) {
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: CPSMS COMMFAIL\n", __LINE__);
-        goto ret;
+        (void) at_send_cmd_wait_ok(&at_dev, "AT+CPSMS?", 5000000);
+        //goto ret;
     }
 
     /* Request Model Identification */
@@ -355,7 +271,7 @@ static int _module_init(void) {
         printf("%d: COMMFAIL\n", __LINE__);
     }
     /* Signal Quality Report */
-    res = at_send_cmd_get_resp(&at_dev, "AT+CSQ", resp, sizeof(resp), 10*1000000);
+    res = at_send_cmd_get_resp(&at_dev, "AT+CSQ", resp, sizeof(resp), 10*US_PER_SEC);
 
     /* Wipe any open sockets */
     uint8_t i;
@@ -373,9 +289,11 @@ static int _module_init(void) {
         res = at_send_cmd_wait_ok(&at_dev, "AT+CMNB=1", 5000000);
         res = at_send_cmd_wait_ok(&at_dev, "AT+CBANDCFG=\"NB-IOT\",1,3,5,8,20,28", 5000000);
 
-        /* Echo mode on */
-        res = at_send_cmd_wait_ok(&at_dev, "ATE1", 500000);
-
+        /* Echo mode */
+        if (CONFIG_AT_SEND_SKIP_ECHO)
+            res = at_send_cmd_wait_ok(&at_dev, "ATE0", 500000);
+        else
+            res = at_send_cmd_wait_ok(&at_dev, "ATE1", 500000);
     }
 
     status.state = AT_RADIO_STATE_IDLE;
@@ -410,7 +328,7 @@ int sim7020_register(void) {
     SIM_LOCK();
 #ifdef FORCE_OPERATOR
     /* Force operator selection */
-    res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*1000000);
+    res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -418,11 +336,12 @@ int sim7020_register(void) {
         return res;
     }
 #endif /* FORCE_OPERATOR */
-    while (!_acttimer_expired()) {
-        res = at_send_cmd_get_resp(&at_dev, "AT+CREG?", resp, sizeof(resp), 120*1000000);
+    while (status.state == AT_RADIO_STATE_IDLE && !_acttimer_expired()) {
+        res = at_send_cmd_get_resp(&at_dev, "AT+CREG?", resp, sizeof(resp), 120*US_PER_SEC);
         if (res < 0) {
         printf("%d: COMMFAIL\n", __LINE__);
             netstats.commfail_count++;
+            _module_reset();
         }
         else {
             uint8_t creg;
@@ -438,7 +357,7 @@ int sim7020_register(void) {
                 }
                 else if ((sim_model == M_SIM7000G) && (creg == 0)) {
                     /* Is this for NB-IoT only, that we can't trust CREG and need to use CGREG? */
-                    res = at_send_cmd_get_resp(&at_dev, "AT+CGREG?", resp, sizeof(resp), 120*1000000);
+                    res = at_send_cmd_get_resp(&at_dev, "AT+CGREG?", resp, sizeof(resp), 120*US_PER_SEC);
                     if (res < 0) {
                         printf("%d: COMMFAIL\n", __LINE__);
                         netstats.commfail_count++;
@@ -459,8 +378,8 @@ int sim7020_register(void) {
         xtimer_sleep(1);
     }
     /* Wait for GPRS/Packet Domain attach */
-    while (!_acttimer_expired()) {
-        res = at_send_cmd_get_resp(&at_dev, "AT+CGATT?", resp, sizeof(resp), 120*1000000);
+    while (status.state == AT_RADIO_STATE_REGISTERED && !_acttimer_expired()) {
+        res = at_send_cmd_get_resp(&at_dev, "AT+CGATT?", resp, sizeof(resp), 120*US_PER_SEC);
         if (res > 0) {
             if (0 == (strcmp(resp, "+CGATT: 1")))
                 break;
@@ -488,7 +407,7 @@ int sim7020_activate(void) {
     SIM_LOCK();
     /* Set CIPMUX=1 - multiplexed connections */
     /* Check if it is 1 already */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CIPMUX?", resp, sizeof(resp), 120*1000000);  
+    res = at_send_cmd_get_resp(&at_dev,"AT+CIPMUX?", resp, sizeof(resp), 120*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -497,7 +416,7 @@ int sim7020_activate(void) {
     at_drain(&at_dev);
     /* Set to 1 */
     if (strcmp(resp, "+CIPMUX: 1") != 0)
-        res = at_send_cmd_wait_ok(&at_dev,"AT+CIPMUX=1", 120*1000000);
+        res = at_send_cmd_wait_ok(&at_dev,"AT+CIPMUX=1", 120*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -513,7 +432,7 @@ int sim7020_activate(void) {
     }
     if (1) {
         /* Set APN and activate */
-        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
+        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
         /* Already activated? */
         if (res > 0) {
             char apn[32];
@@ -523,7 +442,7 @@ int sim7020_activate(void) {
             }
         }
         if (status.state != AT_RADIO_STATE_ACTIVE) {
-            res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*1000000);
+            res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*US_PER_SEC);
             if (res < 0) {
                 netstats.commfail_count++;
                 printf("%d: COMMFAIL\n", __LINE__);
@@ -535,7 +454,7 @@ int sim7020_activate(void) {
     while (!_acttimer_expired() && attempts--) {
       /* Bring Up Wireless Connection with GPRS or CSD. This may take a while. */
       printf("Bringing up wireless, be patient\n");
-      res = at_send_cmd_wait_ok(&at_dev, "AT+CIICR", 600*1000000);
+      res = at_send_cmd_wait_ok(&at_dev, "AT+CIICR", 600*US_PER_SEC);
       if (res == 0) {
         status.state = AT_RADIO_STATE_ACTIVE;
         break;
@@ -561,45 +480,45 @@ int sim7020_status(void) {
     SIM_LOCK();
     if (0) {
         printf("Searching for operators, be patient\n");
-        res = at_send_cmd_get_resp(&at_dev, "AT+COPS=?", resp, sizeof(resp), 120*1000000);
+        res = at_send_cmd_get_resp(&at_dev, "AT+COPS=?", resp, sizeof(resp), 120*US_PER_SEC);
     }
-    res = at_send_cmd_get_resp(&at_dev, "AT+CREG?", resp, sizeof(resp), 120*1000000);
+    res = at_send_cmd_get_resp(&at_dev, "AT+CREG?", resp, sizeof(resp), 120*US_PER_SEC);
     /* Request International Mobile Subscriber Identity */
-    res = at_send_cmd_get_resp(&at_dev, "AT+CIMI", resp, sizeof(resp), 10*1000000);
+    res = at_send_cmd_get_resp(&at_dev, "AT+CIMI", resp, sizeof(resp), 10*US_PER_SEC);
 
     /* Request TA Serial Number Identification (IMEI) */
-    res = at_send_cmd_get_resp(&at_dev, "AT+GSN", resp, sizeof(resp), 10*1000000);
+    res = at_send_cmd_get_resp(&at_dev, "AT+GSN", resp, sizeof(resp), 10*US_PER_SEC);
 
     /* Mode 0: Radio information for serving and neighbor cells */
-    res = at_send_cmd_wait_ok(&at_dev,"AT+CENG=0", 60*1000000);
+    res = at_send_cmd_wait_ok(&at_dev,"AT+CENG=0", 60*US_PER_SEC);
     /* Report Network State */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*US_PER_SEC);
 
-    res = at_send_cmd_wait_ok(&at_dev,"AT+CENG=1", 60*1000000);
+    res = at_send_cmd_wait_ok(&at_dev,"AT+CENG=1", 60*US_PER_SEC);
     /* Report Network State */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CENG?", resp, sizeof(resp), 60*US_PER_SEC);
 
     /* Signal Quality Report */
-    res = at_send_cmd_wait_ok(&at_dev,"AT+CSQ", 60*1000000);
+    res = at_send_cmd_wait_ok(&at_dev,"AT+CSQ", 60*US_PER_SEC);
     /* Task status, APN */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
 
-    res = at_send_cmd_get_resp(&at_dev,"AT+CIPSTATUS", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CIPSTATUS", resp, sizeof(resp), 60*US_PER_SEC);
     /* Get Local IP Address */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CIFSR", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CIFSR", resp, sizeof(resp), 60*US_PER_SEC);
     /* PDP Context Read Dynamic Parameters */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CGCONTRDP", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGCONTRDP", resp, sizeof(resp), 60*US_PER_SEC);
     /* Show PDP Address */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CGPADDR", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGPADDR", resp, sizeof(resp), 60*US_PER_SEC);
     /* Define PDP Context */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CGDCONT", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGDCONT", resp, sizeof(resp), 60*US_PER_SEC);
 
     /* Request TA Model Identification */
-    res = at_send_cmd_get_resp(&at_dev,"AT+GMM", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+GMM", resp, sizeof(resp), 60*US_PER_SEC);
     /* Request Manufacturer Identification */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CGMI", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGMI", resp, sizeof(resp), 60*US_PER_SEC);
     /* Request Model Identification */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CGMM", resp, sizeof(resp), 60*1000000);
+    res = at_send_cmd_get_resp(&at_dev,"AT+CGMM", resp, sizeof(resp), 60*US_PER_SEC);
     SIM_UNLOCK();
     return res;
 }
@@ -609,7 +528,7 @@ int sim7020_status(void) {
 int sim7020_imsi(char *buf, int len) {
     (void) buf; (void) len;
     /* Request International Mobile Subscriber Identity */
-    int res = at_send_cmd_get_resp(&at_dev, "AT+CIMI", resp, sizeof(resp), 10*1000000);
+    int res = at_send_cmd_get_resp(&at_dev, "AT+CIMI", resp, sizeof(resp), 10*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -625,7 +544,7 @@ int sim7020_imsi(char *buf, int len) {
 int sim7020_imei(char *buf, int len) {
     (void) buf; (void) len;
     /* Request International Mobile Equipment Identity */
-    int res = at_send_cmd_get_resp(&at_dev, "AT+GSN", resp, sizeof(resp), 10*1000000);
+    int res = at_send_cmd_get_resp(&at_dev, "AT+GSN", resp, sizeof(resp), 10*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -654,7 +573,7 @@ int sim7020_udp_socket(const sim7020_recv_callback_t recv_callback, void *recv_c
 #else
     int res;
     SIM_LOCK();
-    res = at_send_cmd_get_resp(&at_dev, "AT+CSOC=1,2,1", resp, sizeof(resp), 120*1000000);    
+    res = at_send_cmd_get_resp(&at_dev, "AT+CSOC=1,2,1", resp, sizeof(resp), 120*US_PER_SEC);
     SIM_UNLOCK();
 
     if (res > 0) {
@@ -697,13 +616,13 @@ static int _sock_close(uint8_t sockid) {
     sprintf(cmd, "AT+CSOCL=%d", sockid);
 #endif /* TCPIPSERIALS */
     if ((thread_getpid() == sim7020_pid)) {
-        res = at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);
+        res = at_send_cmd_wait_ok(&at_dev, cmd, 10*US_PER_SEC);
     }
     else {
         TRANS_LOCK();
         char resp[sizeof("NN, CLOSE OK")];
         snprintf(resp, sizeof(resp), "%u, CLOSE OK", sockid);
-        res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
+        res = async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*US_PER_SEC);
         TRANS_UNLOCK();
     }
     return res;
@@ -747,7 +666,7 @@ int _sock_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
     snprintf(resp, sizeof(resp), "%u, CONNECT OK", sockid);
     /* Should perhaps also check for "ALREADY CONNECT" */
     TRANS_LOCK();
-    res = _async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*1000000);
+    res = async_at_send_cmd_wait_resp(&at_dev, cmd, resp, 10*US_PER_SEC);
     TRANS_UNLOCK();
     if (res < 0) {
         return res;
@@ -774,7 +693,7 @@ int sim7020_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
     }
     sim7020_socket_t *sock = &sim7020_sockets[sockid];
     if (memcmp(&sock->remote, remote, sizeof(sock_udp_ep_t)) != 0)
-        sock->flags |= MODULE_OOS; 
+        sock->flags |= MODULE_OOS;
     sock->remote = *remote;
     return 0;
 }
@@ -815,7 +734,7 @@ int sim7020_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
 
     /* Create a socket: IPv4, UDP, 1 */
     SIM_LOCK();
-    res = at_send_cmd_wait_ok(&at_dev, cmd, 120*1000000);
+    res = at_send_cmd_wait_ok(&at_dev, cmd, 120*US_PER_SEC);
     SIM_UNLOCK();
     if (res < 0) {
         netstats.commfail_count++;
@@ -839,16 +758,12 @@ static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
     TRANS_LOCK();
 #ifdef TCPIPSERIALS    
     snprintf(cmd, sizeof(cmd), "AT+CLPORT=%hu,\"UDP\",%hu",sockid, local->port);
-    res = _async_at_send_cmd_wait_ok(&at_dev, cmd, 10*1000000);    
+    res = async_at_send_cmd_wait_ok(&at_dev, cmd, 10*US_PER_SEC);
     TRANS_UNLOCK();
 
     if (res < 0) {
         return res;
     }
-
-    TRANS_LOCK();
-    res = _async_at_send_cmd_wait_ok(&at_dev, "AT+CLPORT?", 10*1000000);    
-    TRANS_UNLOCK();
     return 0;
 #else
     int res;
@@ -875,9 +790,9 @@ static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
     }
     SIM_LOCK();
 
-    res = at_send_cmd_wait_ok(&at_dev, cmd, 120*1000000);
-    (void) at_send_cmd_wait_ok(&at_dev, "AT+CSOCON?", 120*1000000);    
-    res = at_send_cmd_wait_ok(&at_dev, "AT+CSOB?", 120*1000000);
+    res = at_send_cmd_wait_ok(&at_dev, cmd, 120*US_PER_SEC);
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CSOCON?", 120*US_PER_SEC);
+    res = at_send_cmd_wait_ok(&at_dev, "AT+CSOB?", 120*US_PER_SEC);
 
     SIM_UNLOCK();
     printf("socket bound: %d\n", res);
@@ -903,7 +818,7 @@ int sim7020_bind(uint8_t sockid, const sock_udp_ep_t *local) {
     
     sim7020_socket_t *sock = &sim7020_sockets[sockid];
     if (sock->local.port != local->port) {
-        sock->flags |= MODULE_OOS; 
+        sock->flags |= MODULE_OOS;
         sock->local = *local;
     }
     return 0;
@@ -943,7 +858,7 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
     snprintf(cmd, sizeof(cmd), "AT+CSODSEND=%d,%d", sockid, len);
 #endif
     TRANS_LOCK();
-    res = _async_at_send_cmd_wait_resp(&at_dev, cmd, "> ", 10*1000000);
+    res = async_at_send_cmd_wait_resp(&at_dev, cmd, "> ", 10*US_PER_SEC);
     if (res != 0) {
         SIM_UNLOCK();
         printf("AA sendwait fail: %d\n", res);
@@ -956,10 +871,10 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
     {
         async_at_t async_at;
         snprintf(cmd, sizeof(cmd), "%u, SEND OK", sockid);
-        _async_at_setup(&async_at, _async_null_cb, NULL, cmd, 10*1000000);
+        async_at_setup(&async_at, async_at_null_cb, NULL, cmd, 2*US_PER_SEC);
         async_at.cmd = "<SEND>";
-        res = _async_at_wait(&async_at);
-        _async_at_stop(&async_at);
+        res = async_at_wait(&async_at);
+        async_at_stop(&async_at);
     }
     if (res >= 0) {
         res = len;
@@ -968,15 +883,15 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
         netstats.tx_bytes += datalen;
         goto out;
     }
-    printf("res %d\n", res);
     /* else fall through */
+    printf("res %d\n", res);
 #else
     SIM_LOCK();
     at_send_bytes(&at_dev, (char *) data, len);
     /* Skip empty line */
-    (void) at_readline(&at_dev, resp, sizeof(resp), 0, 10*1000000);
+    (void) at_readline(&at_dev, resp, sizeof(resp), 0, 10*US_PER_SEC);
     /* Then look for DATA ACCEPT confirmarion */
-    res = at_readline(&at_dev, resp, sizeof(resp), 0, 10*1000000);
+    res = at_readline(&at_dev, resp, sizeof(resp), 0, 10*US_PER_SEC);
     if (res < 0) {
         printf("Timeout waiting for DATA ACCEPT confirmation\n");
         goto fail;
@@ -996,7 +911,11 @@ fail:
     netstats.tx_failed++;
     netstats.commfail_count++;
     printf("%d: COMMFAIL\n", __LINE__);
-    _module_reset();
+    res = at_send_cmd_wait_ok(&at_dev, "AT", 1*US_PER_SEC);
+    if (res == -1)
+        _module_reset();
+    else
+        printf("All good\n");
 out:
     TRANS_UNLOCK();
     return res;
@@ -1061,13 +980,13 @@ int sim7020_resolve(const char *domain, char *result) {
         return -ENETUNREACH;
 
     /* Only one at a time */
-    mutex_lock(&resolve_mutex); 
+    mutex_lock(&resolve_mutex);
 
 #if 0
     SIM_LOCK();
     /* Check signal quality */
-    (void) at_send_cmd_wait_ok(&at_dev, "AT+CSQ", 10*1000000);
-    (void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*1000000);
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CSQ", 10*US_PER_SEC);
+    (void) at_send_cmd_wait_ok(&at_dev, "AT+CDNSCFG?", 10*US_PER_SEC);
     at_drain(&at_dev);
     SIM_UNLOCK();
 #endif
@@ -1076,21 +995,21 @@ int sim7020_resolve(const char *domain, char *result) {
         set_resolver(&default_resolver);
     }
     async_at.cmd = "<CDNSGIP>";
-    _async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*1000000U);
+    async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*US_PER_SEC);
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+CDNSGIP=%s", domain);
-    res = _async_at_send_cmd_wait_ok(&at_dev, cmd, 6*1000000);
+    res = async_at_send_cmd_wait_ok(&at_dev, cmd, 6*US_PER_SEC);
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
         _module_reset();
         goto out;
     }
-    res = _async_at_wait(&async_at);
+    res = async_at_wait(&async_at);
 
 out:
     mutex_unlock(&resolve_mutex);
-    _async_at_stop(&async_at);
+    async_at_stop(&async_at);
     return res;
 }
 
@@ -1119,7 +1038,7 @@ static void _receive_cb(void *arg, const char *code) {
                  &v4addr->u8[0], &v4addr->u8[1], &v4addr->u8[2], &v4addr->u8[3], &remote.port);
     if (res == 7) {
 #ifdef SIM7020_RECVHEX
-        res = at_readline(&at_dev, (char *) recv_buf, sizeof(recv_buf), 0, 10*1000000);
+        res = at_readline(&at_dev, (char *) recv_buf, sizeof(recv_buf), 0, 10*US_PER_SEC);
         /* Data is encoded as hex string, so
          * data length is half the string length */ 
         int rcvlen = len >> 1;
@@ -1333,7 +1252,7 @@ int sim7020_at(const char *cmd) {
         printf("Warning: mutex locked %u (last unlock %u)\n", mlockline, munlockline);
     }
     //SIM_LOCK();
-    at_send_cmd(&at_dev, cmd, 10*1000000);
+    at_send_cmd(&at_dev, cmd, 10*US_PER_SEC);
     //SIM_UNLOCK();
     return 0;
 }
