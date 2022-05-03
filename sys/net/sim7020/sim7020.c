@@ -824,6 +824,8 @@ int sim7020_bind(uint8_t sockid, const sock_udp_ep_t *local) {
     return 0;
 }
 
+uint32_t longest_send;
+
 int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
     int res;
 
@@ -869,12 +871,24 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
     at_send_bytes(&at_dev, (char *) data, len);
     SIM_UNLOCK();
     {
+        uint32_t start, stop;
+        start = xtimer_now_usec();
+
         async_at_t async_at;
         snprintf(cmd, sizeof(cmd), "%u, SEND OK", sockid);
-        async_at_setup(&async_at, async_at_null_cb, NULL, cmd, 2*US_PER_SEC);
+        async_at_setup(&async_at, async_at_null_cb, NULL, cmd, 10*US_PER_SEC);
         async_at.cmd = "<SEND>";
         res = async_at_wait(&async_at);
         async_at_stop(&async_at);
+        stop = xtimer_now_usec();
+        if (res >= 0) {
+            uint32_t wait;
+            wait = stop - start;
+            if (wait > longest_send) {
+                longest_send = wait;
+                printf("Longest send %" PRIu32 "\n", longest_send);
+            }
+        }
     }
     if (res >= 0) {
         res = len;
@@ -911,11 +925,12 @@ fail:
     netstats.tx_failed++;
     netstats.commfail_count++;
     printf("%d: COMMFAIL\n", __LINE__);
-    res = at_send_cmd_wait_ok(&at_dev, "AT", 1*US_PER_SEC);
+
+    res = async_at_send_cmd_wait_ok(&at_dev, "AT", 1*US_PER_SEC);
     if (res == -1)
         _module_reset();
     else
-        printf("All good\n");
+        printf("All good %d\n", res);
 out:
     TRANS_UNLOCK();
     return res;
@@ -949,10 +964,12 @@ static ipv4_addr_t get_resolver(void) {
     char buf[64];
     ipv4_addr_t v4addr = {.u32 = 0};
     int res;
+    TRANS_LOCK();
     SIM_LOCK();
     res = at_send_cmd_get_resp(&at_dev, "AT+CDNSCFG?", buf, sizeof(buf), 5*US_PER_SEC);
     at_drain(&at_dev);
     SIM_UNLOCK();
+    TRANS_UNLOCK();
     if (res >= 0) {
         res = sscanf(buf, "PrimaryDns: %" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8,
                      &v4addr.u8[0], &v4addr.u8[1], &v4addr.u8[2], &v4addr.u8[3]);
@@ -995,6 +1012,7 @@ int sim7020_resolve(const char *domain, char *result) {
         set_resolver(&default_resolver);
     }
     async_at.cmd = "<CDNSGIP>";
+    TRANS_LOCK();
     async_at_setup(&async_at, _async_resolve_cb, result, "+CDNSGIP:", AT_RADIO_RESOLVE_TIMEOUT*US_PER_SEC);
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+CDNSGIP=%s", domain);
@@ -1008,6 +1026,7 @@ int sim7020_resolve(const char *domain, char *result) {
     res = async_at_wait(&async_at);
 
 out:
+    TRANS_UNLOCK();
     mutex_unlock(&resolve_mutex);
     async_at_stop(&async_at);
     return res;
