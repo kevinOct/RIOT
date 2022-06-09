@@ -314,6 +314,7 @@ int sim7020_reset(void) {
 /* Telia */
 //#define OPERATOR "24001"
 //#define APN "lpwa.telia.iot"
+#undef FORCE_OPERATOR
 /* Tre  */
 //#define OPERATOR "24002"
 //#define APN "internet"
@@ -393,6 +394,9 @@ int sim7020_register(void) {
     }
 
     SIM_UNLOCK();
+    /* Reset if registration did not work */
+    if (status.state != AT_RADIO_STATE_REGISTERED)
+        status.state = AT_RADIO_STATE_RESET;
     return res;
 }
 
@@ -420,7 +424,6 @@ int sim7020_activate(void) {
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
-        printf("CIPMUX=1 fail %d\n", res); 
         goto ret;
     }
     at_drain(&at_dev);
@@ -429,16 +432,27 @@ int sim7020_activate(void) {
         /* Skip APN, if not using GPRS */
         res = at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
         res = at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
+        if (res > 0) {
+            /* Look for '+CGNAPN: 1,"APN"' */
+            char apn[32];
+            if (1 == sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn)) {
+                if (strncmp(apn, APN, sizeof(APN)) == 0) {
+                    status.state = AT_RADIO_STATE_ACTIVE;
+                }
+            }
+        }
     }
-    if (1) {
+    else {
         /* Set APN and activate */
         res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
         /* Already activated? */
         if (res > 0) {
+            /* Look for '+CSTT: "APN","USER","PWD"' */
             char apn[32];
             if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
-                if (strncmp(apn, APN, sizeof(APN)) == 0)
+                if (strncmp(apn, APN, sizeof(APN)) == 0) {
                     status.state = AT_RADIO_STATE_ACTIVE;
+                }
             }
         }
         if (status.state != AT_RADIO_STATE_ACTIVE) {
@@ -451,13 +465,12 @@ int sim7020_activate(void) {
         }
     }
     at_drain(&at_dev);
-    while (!_acttimer_expired() && attempts--) {
+    while (status.state != AT_RADIO_STATE_ACTIVE && !_acttimer_expired() && attempts--) {
       /* Bring Up Wireless Connection with GPRS or CSD. This may take a while. */
       printf("Bringing up wireless, be patient\n");
       res = at_send_cmd_wait_ok(&at_dev, "AT+CIICR", 600*US_PER_SEC);
       if (res == 0) {
         status.state = AT_RADIO_STATE_ACTIVE;
-        break;
       }
       res = at_send_cmd_wait_ok(&at_dev, "AT+CIPSTATUS", 5*US_PER_SEC);
     }
