@@ -67,7 +67,7 @@ int async_at_wait(async_at_t *aap) {
     while (aap->state == R_WAIT)
         thread_sleep();
     if (aap->state != R_DONE) {
-        printf("AA_WAIT state %d\n", (int) aap->state);
+        printf("AA_WAIT -> %d, pid %d urc %s\n", (int) aap->state, aap->pid, aap->urc.code);
         return -1;
     }
     else 

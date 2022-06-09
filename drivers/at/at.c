@@ -33,11 +33,13 @@
 #endif
 
 #define print _printprintable
-static void _printprintable(char *str, int n) {
-    char *c = str;
+static void _printprintable(const char *str, int n) {
+    const char *c = str;
     int i;
     for (i = 0; i < n; i++, c++) {
-        if (isprint(*c))
+        if (*c == '\0')
+            return;
+        else if (isprint(*c))
             putchar(*c);
         else if (*c == '\n' || *c == '\r')
             putchar(*c);
@@ -115,6 +117,11 @@ out:
 
 void at_send_bytes(at_dev_t *dev, const char *bytes, size_t len)
 {
+    if (len != AT_SEND_EOL_LEN || strcmp(bytes, CONFIG_AT_SEND_EOL) != 0) {
+        printf("[%d>", (int) len);
+        print(bytes, 20);
+        printf("]");
+    }
     uart_write(dev->uart, (const uint8_t *)bytes, len);
 }
 
@@ -187,7 +194,7 @@ int at_send_cmd(at_dev_t *dev, const char *command, uint32_t timeout)
 
     uart_write(dev->uart, (const uint8_t *)command, cmdlen);
     uart_write(dev->uart, (const uint8_t *)CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
-
+    printf("(>%s)\n", command);
     if (AT_SEND_ECHO) {
         if (at_expect_bytes(dev, command, timeout)) {
             return -1;
@@ -237,7 +244,18 @@ ssize_t at_send_cmd_get_resp(at_dev_t *dev, const char *command,
         /* skip possible empty line */
         res = at_readline(dev, resp_buf, len, false, timeout);
     }
-
+    if (res > 0) {
+        int len;
+        /* Print until carriage return, to avoid garbled output */ 
+        char *crpos = strchr(resp_buf, '\r');
+        if (crpos == NULL)
+            len = res;
+        else
+            len = crpos - resp_buf;
+        printf("(<%d", len);
+        print(resp_buf, len);
+        printf(")\n");
+    }
 out:
     return res;
 }
@@ -462,6 +480,7 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
 {
     //static char buf[AT_BUF_SIZE];
     int len = 0;
+    int printed = 0;
 
     DEBUG("Processing URC (timeout=%" PRIu32 "us)\n", timeout);
 
@@ -472,21 +491,41 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
         if (res < 0) {
             return;
         }
-        if (AT_PRINT_INCOMING) {
-            print(buf + len, 1);
-        }
 
         if (buf[len] == AT_RECV_EOL_2[0]) {
+            if (AT_PRINT_INCOMING && len > 0 && printed) {
+                printf("]\n");
+                printed = 0;
+            }
             len = 0;
             continue;
         }
 
+        if (AT_PRINT_INCOMING) {
+            if (buf[len] != AT_RECV_EOL_1[0]) {
+                if (printed == 0) {
+                    printf("[<");
+                }
+                if (printed < 20) {
+                    print(buf + len, 1);
+                    printed++;
+                }
+            }
+        }
+
         buf[++len] = '\0';
         if (clist_foreach(&dev->urc_list, _check_urc, buf) != NULL) {
+            if (printed) {
+                printf("!]\n");
+            }
             return;
         }
-        if (len == sizeof(buf)) {
+        if (len == sizeof(buf)-1) {
             len = 0;
+            if (AT_PRINT_INCOMING && printed) {
+                printf("...]\n");
+                printed = 0;
+            }
         }
     }
 }
