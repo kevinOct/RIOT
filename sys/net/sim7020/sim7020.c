@@ -39,6 +39,7 @@ static char resp[1024];
 
 static struct at_radio_status {
     enum {
+        AT_RADIO_STATE_STOPPED,
         AT_RADIO_STATE_RESET,
         AT_RADIO_STATE_NONE,
         AT_RADIO_STATE_INIT,
@@ -89,6 +90,8 @@ static char sim7020_stack[THREAD_STACKSIZE_DEFAULT + AT_BUF_SIZE];
 
 #define SIM7020_PRIO         (THREAD_PRIORITY_MAIN + 2)
 static kernel_pid_t sim7020_pid = KERNEL_PID_UNDEF;
+
+static int stopping; /* Module being administratively stopped */
 
 static int _sock_close(uint8_t sockid);
 static void *sim7020_thread(void *);
@@ -302,9 +305,14 @@ ret:
     return res;
 }
 
+int sim7020_stop(void) {
+    stopping = 1;
+    return 0;
+}
+
 int sim7020_reset(void) {
     status.state = AT_RADIO_STATE_RESET;
-    //_module_reset();
+    stopping = 0;
     return 0;
 }
 /*
@@ -312,15 +320,15 @@ int sim7020_reset(void) {
  */
 /* Operator MCCMNC (mobile country code and mobile network code) */
 /* Telia */
-//#define OPERATOR "24001"
-//#define APN "lpwa.telia.iot"
-#undef FORCE_OPERATOR
+#define OPERATOR "24001"
+#define APN "lpwa.telia.iot"
+#define FORCE_OPERATOR
 /* Tre  */
 //#define OPERATOR "24002"
 //#define APN "internet"
 /* Tele2 */
-#define OPERATOR "24007"
-#define APN "4g.tele2.se"
+//#define OPERATOR "24007"
+//#define APN "4g.tele2.se"
 
 
 int sim7020_register(void) {
@@ -380,6 +388,7 @@ int sim7020_register(void) {
     }
     /* Wait for GPRS/Packet Domain attach */
     while (status.state == AT_RADIO_STATE_REGISTERED && !_acttimer_expired()) {
+        res = at_send_cmd_get_resp(&at_dev, "AT+CGATT=1", resp, sizeof(resp), 120*US_PER_SEC);
         res = at_send_cmd_get_resp(&at_dev, "AT+CGATT?", resp, sizeof(resp), 120*US_PER_SEC);
         if (res > 0) {
             if (0 == (strcmp(resp, "+CGATT: 1")))
@@ -442,7 +451,7 @@ int sim7020_activate(void) {
             }
         }
     }
-    else {
+    if (1) {
         /* Set APN and activate */
         res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
         /* Already activated? */
@@ -475,6 +484,10 @@ int sim7020_activate(void) {
       res = at_send_cmd_wait_ok(&at_dev, "AT+CIPSTATUS", 5*US_PER_SEC);
     }
     res = at_send_cmd_wait_ok(&at_dev, "AT+CIFSR", 5000000);    
+    if (res < 0) {
+      status.state = AT_RADIO_STATE_RESET;
+      goto ret;
+    }
     //res = at_send_cmd_wait_ok(&at_dev, "AT+CIPPING=\"192.16.125.232\"", 5000000);
 
     /* Show Data in Hex Mode of a Package Received */
@@ -1228,8 +1241,17 @@ static void *sim7020_thread(void *arg) {
     (void) arg;
 
     while (1) {
+        if (stopping) {
+            printf("***stopping\n");
+            status.state = AT_RADIO_STATE_STOPPED;
+            stopping = 0;
+        }
         switch (status.state) {
+        case AT_RADIO_STATE_STOPPED:
+            xtimer_sleep(1);
+            break;
         case AT_RADIO_STATE_RESET:
+            printf("***module reset:\n");
             _module_reset();
             break;
         case AT_RADIO_STATE_NONE:

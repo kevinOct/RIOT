@@ -60,6 +60,7 @@ extern sim_model_id_t sim_model;
 typedef void (* sim7020_recv_callback_t)(void *, const uint8_t *data, uint16_t datalen);
 
 int sim7020_init(void);
+int sim7020_stop(void);
 int sim7020_reset(void);
 int sim7020_register(void);
 int sim7020_activate(void);
