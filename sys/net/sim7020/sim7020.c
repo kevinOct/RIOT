@@ -430,53 +430,52 @@ int sim7020_activate(void) {
 
     if (sim_model == M_SIM7000G) {
         /* Skip APN, if not using GPRS */
-        res = at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
-        res = at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
-        if (res > 0) {
-            /* Look for '+CGNAPN: 1,"APN"' */
-            char apn[32];
-            if (1 == sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn)) {
-                if (strncmp(apn, APN, sizeof(APN)) == 0) {
-                    status.state = AT_RADIO_STATE_ACTIVE;
-                }
-            }
-        }
+        /* Automatic mode -- get APN from base station */
+        (void) at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
+        /* Get Network APN in CAT-M Or NB-IOT */
+        (void) at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
+        /* Result scanned as: sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn) */
     }
-    else {
-        /* Set APN and activate */
-        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
-        /* Already activated? */
-        if (res > 0) {
-            /* Look for '+CSTT: "APN","USER","PWD"' */
-            char apn[32];
-            if (1 == sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)) {
-                if (strncmp(apn, APN, sizeof(APN)) == 0) {
-                    status.state = AT_RADIO_STATE_ACTIVE;
-                }
-            }
-        }
-        if (status.state != AT_RADIO_STATE_ACTIVE) {
-            res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*US_PER_SEC);
-            if (res < 0) {
-                netstats.commfail_count++;
-                printf("%d: COMMFAIL\n", __LINE__);
-                goto ret;
-            }
-        }
-    }
+
+    /* Start Task and set APN */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*US_PER_SEC);
+    /* Check APN */
+    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
+    /* Look for '+CSTT: "APN","USER","PWD"'
+     * Result scanned as: sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)
+     */
+
     at_drain(&at_dev);
-    while (status.state != AT_RADIO_STATE_ACTIVE && !_acttimer_expired() && attempts--) {
-      /* Bring Up Wireless Connection with GPRS or CSD. This may take a while. */
-      printf("Bringing up wireless, be patient\n");
-      res = at_send_cmd_wait_ok(&at_dev, "AT+CIICR", 600*US_PER_SEC);
-      if (res == 0) {
-        status.state = AT_RADIO_STATE_ACTIVE;
-      }
-      res = at_send_cmd_wait_ok(&at_dev, "AT+CIPSTATUS", 5*US_PER_SEC);
+    while (!_acttimer_expired() && attempts--) {
+        /* Bring Up Wireless Connection with GPRS or CSD. This may take a while. */
+        printf("Bringing up wireless, be patient\n");
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CIICR", 600*US_PER_SEC);
+        (void) at_send_cmd_wait_ok(&at_dev, "AT+CIPSTATUS", 5*US_PER_SEC);
+        if (res == 0) {
+            break;
+        }
     }
-    res = at_send_cmd_wait_ok(&at_dev, "AT+CIFSR", 5000000);    
+    res = at_send_cmd_get_resp(&at_dev, "AT+CIFSR", resp, sizeof(resp), 5*US_PER_SEC);
+    if (res >= 0) {
+        ipv4_addr_t v4addr;
+
+        res = sscanf(resp, "%" SCNu8 ".%" SCNu8 ".%" SCNu8 ".%" SCNu8,
+                     &v4addr.u8[0], &v4addr.u8[1], &v4addr.u8[2], &v4addr.u8[3]);
+        if (res == 4) {
+            status.state = AT_RADIO_STATE_ACTIVE;
+            goto active;
+        }
+    }
+    /* If we end up here, could not get IP through CIFSR. Take this as indication
+     * that activation failed.
+     */
+    printf("No IP\n");
+    status.state = AT_RADIO_STATE_RESET;
+    goto ret;
+
     //res = at_send_cmd_wait_ok(&at_dev, "AT+CIPPING=\"192.16.125.232\"", 5000000);
 
+active:
     /* Show Data in Hex Mode of a Package Received */
     res = at_send_cmd_wait_ok(&at_dev, "AT+CIPHEXS=2", 5000000);
     /* Show remote address and port on receive */
