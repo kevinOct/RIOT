@@ -251,8 +251,10 @@ static int _module_init(void) {
     /* WIP needs a generic solution */
     //res = at_send_cmd_wait_ok(&at_dev, "AT+CBAND=20", 5000000);
 
-#ifdef SIM7020_RECVHEX
+    /* Report Mobile Equipment Error, verbosely */
+    res = at_send_cmd_wait_ok(&at_dev, "AT+CMEE=2", 2*US_PER_SEC);
 
+#ifdef SIM7020_RECVHEX
     /* Receive data as hex string */
 #ifdef TCPIPSERIALS
     /* Show Data in Hex Mode of a Package Received */
