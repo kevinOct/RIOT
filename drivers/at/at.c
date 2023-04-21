@@ -24,6 +24,10 @@
 #define AT_PRINT_INCOMING (0)
 #endif
 
+#ifndef AT_PRINT_OUTGOING
+#define AT_PRINT_OUTGOING (0)
+#endif
+
 #if defined(MODULE_AT_URC_ISR_LOW)
 #define AT_EVENT_PRIO EVENT_PRIO_LOW
 #elif defined(MODULE_AT_URC_ISR_MEDIUM)
@@ -115,12 +119,14 @@ out:
     return res;
 }
 
+#define MAX_BYTE_PRINT 40
+#define MIN_BYTES(L) ((L) < (MAX_BYTE_PRINT) ? (L) : (MAX_BYTE_PRINT))
+
 void at_send_bytes(at_dev_t *dev, const char *bytes, size_t len)
 {
-    if (len != AT_SEND_EOL_LEN || strcmp(bytes, CONFIG_AT_SEND_EOL) != 0) {
-        printf("[%d>", (int) len);
-        print(bytes, 20);
-        printf("]");
+    if (AT_PRINT_OUTGOING) {
+        print(bytes, MIN_BYTES(len));
+        printf("\n");
     }
     uart_write(dev->uart, (const uint8_t *)bytes, len);
 }
@@ -194,7 +200,8 @@ int at_send_cmd(at_dev_t *dev, const char *command, uint32_t timeout)
 
     uart_write(dev->uart, (const uint8_t *)command, cmdlen);
     uart_write(dev->uart, (const uint8_t *)CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
-    printf("(>%s)\n", command);
+    if (AT_PRINT_OUTGOING)
+        printf("%s\n", command);
     if (AT_SEND_ECHO) {
         if (at_expect_bytes(dev, command, timeout)) {
             return -1;
@@ -493,8 +500,8 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
         }
 
         if (buf[len] == AT_RECV_EOL_2[0]) {
-            if (AT_PRINT_INCOMING && len > 0 && printed) {
-                printf("]\n");
+            if (AT_PRINT_INCOMING) {
+                print("\n", 1);
                 printed = 0;
             }
             len = 0;
@@ -503,10 +510,7 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
 
         if (AT_PRINT_INCOMING) {
             if (buf[len] != AT_RECV_EOL_1[0]) {
-                if (printed == 0) {
-                    printf("[<");
-                }
-                if (printed < 20) {
+                if (AT_PRINT_INCOMING && (printed < MAX_BYTE_PRINT)) {
                     print(buf + len, 1);
                     printed++;
                 }
@@ -515,15 +519,13 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
 
         buf[++len] = '\0';
         if (clist_foreach(&dev->urc_list, _check_urc, buf) != NULL) {
-            if (printed) {
-                printf("!]\n");
-            }
+            if (AT_PRINT_INCOMING)
+                print("\n", 1);
             return;
         }
         if (len == sizeof(buf)-1) {
             len = 0;
             if (AT_PRINT_INCOMING && printed) {
-                printf("...]\n");
                 printed = 0;
             }
         }
