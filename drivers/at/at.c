@@ -251,18 +251,7 @@ ssize_t at_send_cmd_get_resp(at_dev_t *dev, const char *command,
         /* skip possible empty line */
         res = at_readline(dev, resp_buf, len, false, timeout);
     }
-    if (res > 0) {
-        int len;
-        /* Print until carriage return, to avoid garbled output */ 
-        char *crpos = strchr(resp_buf, '\r');
-        if (crpos == NULL)
-            len = res;
-        else
-            len = crpos - resp_buf;
-        printf("(<%d", len);
-        print(resp_buf, len);
-        printf(")\n");
-    }
+
 out:
     return res;
 }
