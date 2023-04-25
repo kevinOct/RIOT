@@ -36,21 +36,56 @@
 #define AT_EVENT_PRIO EVENT_PRIO_HIGH
 #endif
 
-#define print _printprintable
+#define print(S, L) _printprintable(S, L)
 static void _printprintable(const char *str, int n) {
     const char *c = str;
     int i;
-    for (i = 0; i < n; i++, c++) {
-        if (*c == '\0')
-            return;
-        else if (isprint(*c))
+    for (i = 0; i < n && *c != '\0'; i++, c++) {
+        if (isprint(*c))
             putchar(*c);
-        else if (*c == '\n' || *c == '\r')
+        else if (*c == '\n' || *c == '\r') {
             putchar(*c);
+        }
         else
-            printf("x%02" PRIx8, (uint8_t) *c);
+            printf("x%02" PRIx8, *c);
     }
 }
+
+static void putprintable(char c) {
+    if (isprint(c))
+        putchar(c);
+    else if (c == '\n' || c == '\r') {
+        putchar(c);
+    }
+    else
+        printf("x%02" PRIx8, (uint8_t)c);
+}
+
+static void printin(const char *str, int n) {
+    const char *c = str;
+    int i;
+    for (i = 0; i < n && *c != '\0'; i++, c++) {
+        putprintable(*c);
+    }
+}
+            
+#define PRINTIN(S, N) {if (AT_PRINT_INCOMING) printin((S), (N));}
+
+static void printout(const char *str, int n) {
+    const char *c = str;
+    int i;
+    for (i = 0; i < n && *c != '\0'; i++, c++) {
+        if ((n-1 >= (int) AT_SEND_EOL_LEN) && (strncmp(c, CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN) == 0)) {
+            putchar('\n');
+            i += AT_SEND_EOL_LEN - 1;
+            c += AT_SEND_EOL_LEN - 1;
+        }
+        else
+            putprintable(*c);
+    }
+}
+
+#define PRINTOUT(S, N) {if (AT_PRINT_OUTGOING) printout((S), (N));}
 
 #if defined(MODULE_AT_URC_ISR)
 static void _event_process_urc(event_t *_event)
@@ -97,7 +132,8 @@ int at_expect_bytes(at_dev_t *dev, const char *bytes, uint32_t timeout)
     while (*bytes) {
         char c;
         if ((res = isrpipe_read_timeout(&dev->isrpipe, (uint8_t *)&c, 1, timeout)) == 1) {
-            if (AT_PRINT_INCOMING) {
+            PRINTIN(&c, 1);
+            if (0 && AT_PRINT_INCOMING) {
                 print(&c, 1);
             }
             if (c != *bytes++) {
@@ -124,9 +160,10 @@ out:
 
 void at_send_bytes(at_dev_t *dev, const char *bytes, size_t len)
 {
-    if (AT_PRINT_OUTGOING) {
+    PRINTOUT(bytes, MIN_BYTES(len));
+    if (0 && AT_PRINT_OUTGOING) {
         print(bytes, MIN_BYTES(len));
-        printf("\n");
+        //printf("\n");
     }
     uart_write(dev->uart, (const uint8_t *)bytes, len);
 }
@@ -172,7 +209,8 @@ int at_recv_bytes_until_string(at_dev_t *dev, const char *string,
     while (*_string && len < *bytes_len) {
         char c;
         if ((res = isrpipe_read_timeout(&dev->isrpipe, (uint8_t *)&c, 1, timeout)) == 1) {
-            if (AT_PRINT_INCOMING) {
+            PRINTIN(&c, 1);
+            if (0 && AT_PRINT_INCOMING) {
                 print(&c, 1);
             }
             if (c == *_string) {
@@ -200,8 +238,11 @@ int at_send_cmd(at_dev_t *dev, const char *command, uint32_t timeout)
 
     uart_write(dev->uart, (const uint8_t *)command, cmdlen);
     uart_write(dev->uart, (const uint8_t *)CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
-    if (AT_PRINT_OUTGOING)
-        printf("%s\n", command);
+    PRINTOUT(command, cmdlen);
+    if (0 && AT_PRINT_OUTGOING) {
+      print(command, cmdlen);
+      print("\n", 1);
+    }
     if (AT_SEND_ECHO) {
         if (at_expect_bytes(dev, command, timeout)) {
             return -1;
@@ -227,6 +268,14 @@ void at_drain(at_dev_t *dev)
     do {
         /* consider no character within 10ms "drained" */
         res = isrpipe_read_timeout(&dev->isrpipe, _tmp, sizeof(_tmp), 10000U);
+        if (0 && res > 0 && AT_PRINT_OUTGOING) {
+            print((char *)_tmp, res);
+        }
+        if (res > 0) {
+            PRINTIN((char *)_tmp, res);
+        }
+
+          
     } while (res > 0);
 
 #if IS_USED(MODULE_AT_URC_ISR)
@@ -335,6 +384,12 @@ int at_send_cmd_wait_prompt(at_dev_t *dev, const char *command, uint32_t timeout
 
     uart_write(dev->uart, (const uint8_t *)command, cmdlen);
     uart_write(dev->uart, (const uint8_t *)CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
+    PRINTOUT(command, cmdlen);
+    PRINTOUT(CONFIG_AT_SEND_EOL, AT_SEND_EOL_LEN);
+    if (0 && AT_PRINT_OUTGOING) {
+      print(command, cmdlen);
+      print("\n", 1);
+    }
 
     if (at_expect_bytes(dev, command, timeout)) {
         return -1;
@@ -389,7 +444,8 @@ ssize_t at_readline(at_dev_t *dev, char *resp_buf, size_t len, bool keep_eol, ui
         int read_res;
         if ((read_res = isrpipe_read_timeout(&dev->isrpipe, (uint8_t *)resp_pos,
                                              1, timeout)) == 1) {
-            if (AT_PRINT_INCOMING) {
+            PRINTIN(resp_pos, read_res);
+            if (0 && AT_PRINT_INCOMING) {
                 print(resp_pos, read_res);
             }
             if (sizeof(eol) > 2 && *resp_pos == eol[0]) {
@@ -489,7 +545,7 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
         }
 
         if (buf[len] == AT_RECV_EOL_2[0]) {
-            if (AT_PRINT_INCOMING) {
+            if (0 && AT_PRINT_INCOMING) {
                 print("\n", 1);
                 printed = 0;
             }
@@ -497,19 +553,18 @@ void at_process_urc_byte(at_dev_t *dev, uint32_t timeout)
             continue;
         }
 
-        if (AT_PRINT_INCOMING) {
-            if (buf[len] != AT_RECV_EOL_1[0]) {
-                if (AT_PRINT_INCOMING && (printed < MAX_BYTE_PRINT)) {
-                    print(buf + len, 1);
-                    printed++;
-                }
-            }
+        if (printed < MAX_BYTE_PRINT) {
+            PRINTIN(buf + len, 1);
+            printed++;
+        }
+
+        if (0 && AT_PRINT_INCOMING && (printed < MAX_BYTE_PRINT)) {
+            print(buf + len, 1);
+            printed++;
         }
 
         buf[++len] = '\0';
         if (clist_foreach(&dev->urc_list, _check_urc, buf) != NULL) {
-            if (AT_PRINT_INCOMING)
-                print("\n", 1);
             return;
         }
         if (len == sizeof(buf)-1) {
