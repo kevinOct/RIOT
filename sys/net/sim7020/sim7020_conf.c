@@ -28,6 +28,10 @@
 #include "net/sim7020_conf.h"
 //#include "net/sim7020_powerkey.h"
 
+#ifdef BOARD_AVR_RSS2
+#include "pstr_print.h"
+#endif
+
 #include "eedata.h"
 
 sim7020_conf_t conf = {
@@ -44,14 +48,32 @@ sim7020_conf_t *sim7020_conf(void) {
     return &conf;
 }
     
+#include <string.h>
+#include "hashes.h"
+
+#if 0
+static void hdump(uint8_t data[], size_t len) {
+    size_t i;
+    for (i = 0; i < len; i++)
+        printf("%02x ", (uint8_t) data[i]);
+}
+#endif
+
+static void printconf(void) {
+    printf("apn: %s\n", conf.apn);
+    printf("operator: %s\n", conf.operator);
+}
+
 void sim7020_conf_init(void) {
     sim7020_conf_t confdata;
     int n = read_eeprom(&confdata, &ee_data, sizeof(confdata));
-    printf("read eeprom %d\n", n);
-    printf("apn %16s\n", confdata.apn);
-    printf("operator %8s\n", confdata.operator);    
     if (n != 0) {
         memcpy(&conf, &confdata, sizeof(conf));
+        printf("SIM config: \n");
+        printconf();
+    }
+    else {
+      printf("No SIM config\n");
     }
 }
 
@@ -60,11 +82,6 @@ void sim7020_conf_init(void) {
  */
 char *sim7020_conf_operator(void) {
     return "24007";
-}
-
-void printconf(void) {
-    printf("apn: %s\n", conf.apn);
-    printf("operator: %s\n", conf.operator);
 }
 
 #define MINMATCH 2
@@ -80,10 +97,12 @@ int cmd_sim7020_conf(int argc, char **argv) {
         else if (strncmp(argv[1], "operator", MINMATCH) == 0) {
             strncpy(conf.operator, argv[2], sizeof(conf.operator));
         }
+        else if (strncmp(argv[1], "restore", MINMATCH) == 0) {
+            read_eeprom(&conf, &ee_data, sizeof(conf));
+        }
         else if (strncmp(argv[1], "save", MINMATCH) == 0) {
             update_eeprom(&conf, &ee_data, sizeof(conf));
         }
-
         else
             goto usage;
         return 1;
@@ -94,6 +113,8 @@ usage:
     char *indent = "  ";
     printf("%s%s apn <apn>\n", indent, argv[0]);
     printf("%s%s operator <operator>\n", indent, argv[0]);
+    printf("%s%s restore\n", indent, argv[0]);
+    printf("%s%s save\n", indent, argv[0]);
     return -1;  
 }
 
