@@ -23,6 +23,7 @@
 #include "periph/uart.h"
 
 #include "net/sim7020.h"
+#include "net/sim7020_conf.h"
 //#include "net/sim7020_powerkey.h"
 
 #define SIM7020_RECVHEX
@@ -126,6 +127,7 @@ uint64_t sim7020_prev_active_duration_usecs; /* How long previous activation las
 
 int sim7020_init(void) {
 
+    sim7020_conf_init();
     sim7xxx_powerkey_init();
     int res = at_dev_init(&at_dev, SIM7020_UART_DEV, SIM7020_BAUDRATE, buf, sizeof(buf));
     if (res != UART_OK) {
@@ -339,7 +341,12 @@ int sim7020_register(void) {
     SIM_LOCK();
 #ifdef FORCE_OPERATOR
     /* Force operator selection */
-    res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*US_PER_SEC);
+    char cmd[64];
+    int len = sizeof(cmd);
+    (void) snprintf(cmd, len, "AT+COPS=1,2,\"%s\"", sim7020_conf()->operator);
+
+    //res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*US_PER_SEC);
+    res = at_send_cmd_wait_ok(&at_dev, cmd, 240*US_PER_SEC);    
     if (res < 0) {
         netstats.commfail_count++;
         printf("%d: COMMFAIL\n", __LINE__);
@@ -448,8 +455,11 @@ int sim7020_activate(void) {
         /* Result scanned as: sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn) */
     }
 
+    char cmd[64];
+    int len = sizeof(cmd);
+    (void) snprintf(cmd, len, "AT+CSTT=\"%s\",\"\",\"\"", sim7020_conf()->apn);
     /* Start Task and set APN */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT=\"" APN "\",\"\",\"\"", resp, sizeof(resp), 120*US_PER_SEC);
+    res = at_send_cmd_get_resp(&at_dev, cmd, resp, sizeof(resp), 120*US_PER_SEC);
     /* Check APN */
     res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
     /* Look for '+CSTT: "APN","USER","PWD"'
