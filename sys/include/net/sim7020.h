@@ -57,6 +57,28 @@ typedef enum sim_model_id sim_model_id_t;
 
 extern sim_model_id_t sim_model;
 
+#define APN_SIZE 64
+#define OPERATOR_SIZE 8
+
+typedef enum {
+    SIM7020_CONF_MANUAL_OPERATOR = 1 << 0,
+    SIM7020_CONF_MANUAL_APN      = 1 << 1,
+} conf_flags_t;
+
+struct sim7020_conf {
+    conf_flags_t flags;
+    char apn[APN_SIZE]; /* APN (Access Point Name) */
+    char operator[OPERATOR_SIZE];  /* Operator MCCMNC (mobile country code and mobile network code) */
+};
+
+/* 
+ * Telia: operator 24001 APN "lpwa.telia.iot"
+ * Tre: operator 24002 APN "internet"
+ * Tele2: operator 24007 APN "4g.tele2.se"
+ */
+
+typedef struct sim7020_conf sim7020_conf_t;
+
 typedef void (* sim7020_recv_callback_t)(void *, const uint8_t *data, uint16_t datalen);
 
 int sim7020_init(void);
@@ -74,7 +96,6 @@ int sim7020_bind(const uint8_t sockid, const sock_udp_ep_t *remote);
 int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen);
 void *sim7020_recv_thread(void *arg);
 int sim7020_resolve(const char *domain, char *result);
-#include "net/sim7020_conf.h" //To be deleted
 void sim7020_setconf(sim7020_conf_t *);
 sim7020_netstats_t *sim7020_get_netstats(void);
 int sim7020_active(void);

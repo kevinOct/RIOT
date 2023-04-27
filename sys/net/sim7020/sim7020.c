@@ -23,7 +23,6 @@
 #include "periph/uart.h"
 
 #include "net/sim7020.h"
-#include "net/sim7020_conf.h"
 //#include "net/sim7020_powerkey.h"
 
 #define SIM7020_RECVHEX
@@ -133,7 +132,6 @@ uint64_t sim7020_prev_active_duration_usecs; /* How long previous activation las
 
 int sim7020_init(void) {
 
-    sim7020_conf_init();
     sim7xxx_powerkey_init();
     int res = at_dev_init(&at_dev, SIM7020_UART_DEV, SIM7020_BAUDRATE, buf, sizeof(buf));
     if (res != UART_OK) {
