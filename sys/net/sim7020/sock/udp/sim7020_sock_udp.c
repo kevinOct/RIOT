@@ -47,7 +47,7 @@ uint16_t _get_dyn_port(void) {
     return portno;
 }
 
-static void _ep_print(const sock_udp_ep_t *ep) {
+__attribute__((unused)) static void _ep_print(const sock_udp_ep_t *ep) {
     if (ep == NULL) {
         printf("<none>");
     }
@@ -106,7 +106,6 @@ static int _reg(sock_udp_t *sock,
 int sock_udp_create(sock_udp_t *sock, const sock_udp_ep_t *local,
                     const sock_udp_ep_t *remote, uint16_t flags)
 {
-    printf("sock_udp_create 0x%x: ", sock); _ep_print(local); printf(" -> "); _ep_print(remote); printf("\n");
     (void)flags;
     assert((sock != NULL));
     assert((remote == NULL) || (remote->port != 0));
@@ -221,7 +220,7 @@ int sock_udp_recv(sock_udp_t *sock, void *data, size_t max_len,
         printf("sock_udp_recv: Bad msg type %d\n", msg.type);
     }
     atomic_fetch_sub(&sock->receivers, 1);
-    printf("sock_udp_recv[%d:%s] -> %d\n", thread_get_active()->pid, thread_getname(thread_get_active()->pid), res);
+    //printf("sock_udp_recv[%d:%s] -> %d\n", thread_get_active()->pid, thread_getname(thread_get_active()->pid), res);
     return res;
 }
 
