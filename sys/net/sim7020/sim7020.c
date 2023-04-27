@@ -683,7 +683,6 @@ static int _sock_close(uint8_t sockid) {
 
 int sim7020_close(uint8_t sockid) {
 
-    printf("sim7020_close %d\n", sockid);
     int res = _sock_close(sockid);
     sim7020_socket_t *sock = &sim7020_sockets[sockid];
     sock->recv_callback = NULL;
@@ -801,10 +800,6 @@ int sim7020_connect(uint8_t sockid, const sock_udp_ep_t *remote) {
 static int _sock_bind(uint8_t sockid, const sock_udp_ep_t *local) {
 
 #ifdef SIM7020_BIND_ENABLE
-    printf("binding to to ipv6 mapped ");
-    ipv6_addr_print((ipv6_addr_t *) &local->addr.ipv6);
-    printf(":%u\n", local->port);
-
     int res;
     char cmd[64];
 
@@ -939,7 +934,6 @@ int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen) {
             wait = stop - start;
             if (wait > longest_send) {
                 longest_send = wait;
-                printf("Longest send %" PRIu32 "\n", longest_send);
             }
         }
     }
