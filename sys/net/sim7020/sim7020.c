@@ -94,8 +94,14 @@ static kernel_pid_t sim7020_pid = KERNEL_PID_UNDEF;
 
 static int stopping; /* Module being administratively stopped */
 
+sim7020_conf_t sim7020_conf; /* Current configuration */
+
 static int _sock_close(uint8_t sockid);
 static void *sim7020_thread(void *);
+
+void sim7020_setconf(sim7020_conf_t *newconf) {
+    sim7020_conf = *newconf;
+}
 
 sim7020_netstats_t *sim7020_get_netstats(void) {
     return &netstats;
@@ -340,18 +346,20 @@ int sim7020_register(void) {
 
     SIM_LOCK();
 #ifdef FORCE_OPERATOR
-    /* Force operator selection */
-    char cmd[64];
-    int len = sizeof(cmd);
-    (void) snprintf(cmd, len, "AT+COPS=1,2,\"%s\"", sim7020_conf()->operator);
+    if (sim7020_conf.flags & SIM7020_CONF_MANUAL_OPERATOR) {
+        /* Force operator selection */
+        char cmd[64];
+        int len = sizeof(cmd);
+        (void) snprintf(cmd, len, "AT+COPS=1,2,\"%s\"", sim7020_conf.operator);
 
-    //res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*US_PER_SEC);
-    res = at_send_cmd_wait_ok(&at_dev, cmd, 240*US_PER_SEC);    
-    if (res < 0) {
-        netstats.commfail_count++;
-        printf("%d: COMMFAIL\n", __LINE__);
-        SIM_UNLOCK();
-        return res;
+        //res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=1,2,\"" OPERATOR "\"", 240*US_PER_SEC);
+        res = at_send_cmd_wait_ok(&at_dev, cmd, 240*US_PER_SEC);    
+        if (res < 0) {
+            netstats.commfail_count++;
+            printf("%d: COMMFAIL\n", __LINE__);
+            SIM_UNLOCK();
+            return res;
+        }
     }
 #endif /* FORCE_OPERATOR */
     while (status.state == AT_RADIO_STATE_IDLE && !_acttimer_expired()) {
@@ -395,6 +403,10 @@ int sim7020_register(void) {
         }
         xtimer_sleep(1);
     }
+    res = at_send_cmd_wait_ok(&at_dev, "AT+COPS?", 120*US_PER_SEC);
+    /* Dump all operators: */
+    //res = at_send_cmd_wait_ok(&at_dev, "AT+COPN", 120*US_PER_SEC);
+
     /* Wait for GPRS/Packet Domain attach */
     while (status.state == AT_RADIO_STATE_REGISTERED && !_acttimer_expired()) {
         res = at_send_cmd_get_resp(&at_dev, "AT+CGATT=1", resp, sizeof(resp), 120*US_PER_SEC);
@@ -446,25 +458,35 @@ int sim7020_activate(void) {
     }
     at_drain(&at_dev);
 
-    if (sim_model == M_SIM7000G) {
+    /* Start task */
+    if (sim7020_conf.flags & SIM7020_CONF_MANUAL_APN) {
+        /* This should be default on 7020E */
+        char cmd[64];
+        int len = sizeof(cmd);
+        (void) snprintf(cmd, len, "AT+CSTT=\"%s\",\"\",\"\"", sim7020_conf.apn);
+        /* Start Task and set APN */
+        res = at_send_cmd_get_resp(&at_dev, cmd, resp, sizeof(resp), 120*US_PER_SEC);
+        /* Check APN */
+        res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
+        /* Look for '+CSTT: "APN","USER","PWD"'
+         * Result scanned as: sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)
+         */
+    }
+    else {
+        /* This should be default on 7020E */
         /* Skip APN, if not using GPRS */
         /* Automatic mode -- get APN from base station */
         (void) at_send_cmd_wait_ok(&at_dev, "AT+CAPNMODE=0", 5*US_PER_SEC);
         /* Get Network APN in CAT-M Or NB-IOT */
         (void) at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5000000);
         /* Result scanned as: sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn) */
+        res = at_send_cmd_wait_ok(&at_dev, "AT+CSTT", 5*US_PER_SEC);
+        if (res < 0) {
+            netstats.commfail_count++;
+            printf("%d: CSTT FAIL\n", __LINE__);
+            goto ret;
+        }
     }
-
-    char cmd[64];
-    int len = sizeof(cmd);
-    (void) snprintf(cmd, len, "AT+CSTT=\"%s\",\"\",\"\"", sim7020_conf()->apn);
-    /* Start Task and set APN */
-    res = at_send_cmd_get_resp(&at_dev, cmd, resp, sizeof(resp), 120*US_PER_SEC);
-    /* Check APN */
-    res = at_send_cmd_get_resp(&at_dev,"AT+CSTT?", resp, sizeof(resp), 60*US_PER_SEC);
-    /* Look for '+CSTT: "APN","USER","PWD"'
-     * Result scanned as: sscanf(resp, "+CSTT: \"%31[^\"]\",\"%*[^\"]\",\"%*[^\"]\"", apn)
-     */
 
     at_drain(&at_dev);
     while (!_acttimer_expired() && attempts--) {

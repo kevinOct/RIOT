@@ -35,18 +35,16 @@
 #include "eedata.h"
 
 sim7020_conf_t conf = {
-    "4g.tele2.se",
-    "24007"
+    .flags = 0,
+    .apn = "4g.tele2.se",
+    .operator = "24007"
 };
 
 static EEMEM struct {
     eehash_t ee_hash;
-     sim7020_conf_t ee_conf;
+    sim7020_conf_t ee_conf;
 } ee_data;
 
-sim7020_conf_t *sim7020_conf(void) {
-    return &conf;
-}
     
 #include <string.h>
 #include "hashes.h"
@@ -64,13 +62,18 @@ static void printconf(void) {
     printf("operator: %s\n", conf.operator);
 }
 
+static void _apply(void) {
+    sim7020_setconf(&conf);
+}
+
 void sim7020_conf_init(void) {
     sim7020_conf_t confdata;
     int n = read_eeprom(&confdata, &ee_data, sizeof(confdata));
     if (n != 0) {
         memcpy(&conf, &confdata, sizeof(conf));
-        printf("SIM config: \n");
+        printf("Apply SIM config: \n");
         printconf();
+        _apply();
     }
     else {
       printf("No SIM config\n");
@@ -93,9 +96,14 @@ int cmd_sim7020_conf(int argc, char **argv) {
     else if (argc >= 2) {
         if (strncmp(argv[1], "apn", MINMATCH) == 0) {
             strncpy(conf.apn, argv[2], sizeof(conf.apn));
+            conf.flags |= SIM7020_CONF_MANUAL_APN;
+        }
+        else if (strncmp(argv[1], "clear", MINMATCH) == 0) {
+            erase_eeprom(&ee_data, sizeof(ee_data));
         }
         else if (strncmp(argv[1], "operator", MINMATCH) == 0) {
             strncpy(conf.operator, argv[2], sizeof(conf.operator));
+            conf.flags |= SIM7020_CONF_MANUAL_OPERATOR;
         }
         else if (strncmp(argv[1], "restore", MINMATCH) == 0) {
             read_eeprom(&conf, &ee_data, sizeof(conf));

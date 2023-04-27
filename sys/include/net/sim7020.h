@@ -74,6 +74,8 @@ int sim7020_bind(const uint8_t sockid, const sock_udp_ep_t *remote);
 int sim7020_send(uint8_t sockid, uint8_t *data, size_t datalen);
 void *sim7020_recv_thread(void *arg);
 int sim7020_resolve(const char *domain, char *result);
+#include "net/sim7020_conf.h" //To be deleted
+void sim7020_setconf(sim7020_conf_t *);
 sim7020_netstats_t *sim7020_get_netstats(void);
 int sim7020_active(void);
 int sim7020_at(const char *cmd);
