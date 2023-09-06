@@ -58,26 +58,41 @@ typedef enum sim_model_id sim_model_id_t;
 extern sim_model_id_t sim_model;
 
 #define APN_SIZE 64
-#define OPERATOR_SIZE 8
+#define OPERATOR_NUM_SIZE 8
+#define OPERATOR_LONG_SIZE 32
 
 typedef enum {
     SIM7020_CONF_MANUAL_OPERATOR = 1 << 0,
     SIM7020_CONF_MANUAL_APN      = 1 << 1,
 } conf_flags_t;
+#define SIM7020_CONF_FLAGS_DEFAULT (0)
 
+/*
+ * SIM7020 configuration
+ */
 struct sim7020_conf {
     conf_flags_t flags;
     char apn[APN_SIZE]; /* APN (Access Point Name) */
-    char operator[OPERATOR_SIZE];  /* Operator MCCMNC (mobile country code and mobile network code) */
+    char operator[OPERATOR_NUM_SIZE];  /* Operator MCCMNC (mobile country code and mobile network code) */
 };
+typedef struct sim7020_conf sim7020_conf_t;
+
+/*
+ * Structure with operator info
+ */ 
+struct sim7020_operator {
+    char longname[OPERATOR_LONG_SIZE];   /* Long format alphanumeric */
+    char numname[OPERATOR_NUM_SIZE];     /* Numeric */
+    uint8_t stat;                        /* Status? unknown/available/current/forbidden */
+    uint8_t netact;                      /* GSM/LTE/NBIoT */
+};
+typedef struct sim7020_operator sim7020_operator_t;
 
 /* 
  * Telia: operator 24001 APN "lpwa.telia.iot"
  * Tre: operator 24002 APN "internet"
  * Tele2: operator 24007 APN "4g.tele2.se"
  */
-
-typedef struct sim7020_conf sim7020_conf_t;
 
 typedef void (* sim7020_recv_callback_t)(void *, const uint8_t *data, uint16_t datalen);
 
@@ -89,6 +104,9 @@ int sim7020_activate(void);
 int sim7020_status(void);
 int sim7020_imsi(char *buf, int len);
 int sim7020_imei(char *buf, int len);
+int sim7020_apn(char *buf, int len);
+int sim7020_operator(char *buf, int len);
+int sim7020_scan(sim7020_operator_t *op, int first);
 int sim7020_udp_socket(const sim7020_recv_callback_t recv_callback, void *recv_callback_arg);
 int sim7020_close(uint8_t sockid);
 int sim7020_connect(const uint8_t sockid, const sock_udp_ep_t *remote);

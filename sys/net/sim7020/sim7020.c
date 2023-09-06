@@ -609,6 +609,122 @@ int sim7020_imei(char *buf, int len) {
     }
 }
 
+/*
+ * Get current APN
+ */
+int sim7020_apn(char *buf, int len) {
+    int res;
+
+    res = at_send_cmd_get_resp(&at_dev, "AT+CGNAPN", resp, sizeof(resp), 5*US_PER_SEC);
+    /* Result scanned as: sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", apn) */
+    if (res < 0) {
+        netstats.commfail_count++;
+        printf("%d: COMMFAIL\n", __LINE__);
+        return 0;
+    }
+    else {
+        res = sscanf(resp, "+CGNAPN: 1,\"%31[^\"]\"", buf);
+        if (res == 1) {
+            return strnlen(buf, len);
+        }
+        else {
+            return 0;
+        }
+    }
+}
+
+/*
+ * Get current operator, in numerical format
+ */
+int sim7020_operator(char *buf, int len) {
+    int res;
+
+    /* Use numerical format */
+    res = at_send_cmd_wait_ok(&at_dev, "AT+COPS=3,2", 5*US_PER_SEC);
+    if (res < 0) {
+        goto commfail;
+    }
+    res = at_send_cmd_get_resp(&at_dev, "AT+COPS?", resp, sizeof(resp), 5*US_PER_SEC);
+    if (res < 0) {
+        goto commfail;
+    }
+    else {
+        res = sscanf(resp, "+COPS: %*" SCNu8 ",%*" SCNu8 ",\"%8[^\"]\",%*" SCNu8, buf);
+        if (res == 1) {
+            return strnlen(buf, len);
+        }
+        else {
+            printf("bad res %d\n", res);
+            return 0;
+        }
+    }
+commfail:
+    netstats.commfail_count++;
+    printf("%d: COMMFAIL\n", __LINE__);
+    return 0;
+}
+
+/*
+ * Get current operator, in numerical format
+ */
+int sim7020_scan(sim7020_operator_t *op, int first) {
+    int res;
+    char *tok;
+
+    if (first) {
+        res = at_send_cmd_get_resp(&at_dev, "AT+COPS=?", resp, sizeof(resp), 60*US_PER_SEC);
+        if (res < 0) {
+            goto commfail;
+        }
+        (void) strtok(resp, "(");        
+        tok = strtok(NULL, "(");
+    }
+    else {
+        tok = strtok(NULL, "(");
+    }
+    if (!tok)
+        return 0;
+    res = sscanf(tok, "%" SCNu8 ",\"%31[^\"]\",\"%*[^\"]\",\"%7[^\"]\",%" SCNu8 ")",
+                 &op->stat, op->longname, op->numname, &op->netact);    
+    return (res == 4);
+
+commfail:
+    netstats.commfail_count++;
+    printf("%d: COMMFAIL\n", __LINE__);
+    return 0;
+}
+
+int sim7020_scan_x(char *buf, int len) {
+    int res;
+    (void) buf; (void) len;
+    res = at_send_cmd_get_resp(&at_dev, "AT+COPS=?", resp, sizeof(resp), 60*US_PER_SEC);
+    if (res < 0) {
+        goto commfail;
+    }
+    else {
+        (void) strtok(resp, "(");        
+        char *tok = strtok(NULL, "(");
+        while (tok) {
+
+            printf("TOKEN %s\n", tok);
+            uint8_t stat, netact;
+            char longop[32], numop[8];
+            res = sscanf(tok, "%" SCNu8 ",\"%31[^\"]\",\"%*[^\"]\",\"%7[^\"]\",%" SCNu8 ")", &stat, longop, numop, &netact);
+            printf("res %d\n", res);
+            if (res == 4)
+                printf("%s %s\n", longop, numop);
+            else
+                break;
+            tok = strtok(NULL, "(");
+        }            
+    }
+commfail:
+    netstats.commfail_count++;
+    printf("%d: COMMFAIL\n", __LINE__);
+    return 0;
+}
+
+
 int sim7020_udp_socket(const sim7020_recv_callback_t recv_callback, void *recv_callback_arg) {
     /* Create a socket: IPv4, UDP, 1 */
 
