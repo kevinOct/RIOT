@@ -6,6 +6,7 @@
 #include "net/sim7000g_powerkey.h"
 
 static gpio_t sim7000g_pin = SIM7000G_LDO_GPIO;
+static gpio_t sim7000g_wake_pin = SIM7000G_WAKE_GPIO;
 
 int sim7000g_powerkey_init(void) {
     int res;
@@ -17,6 +18,7 @@ int sim7000g_powerkey_init(void) {
 
 void sim7000g_power_on(void) {
     gpio_set(sim7000g_pin);
+    gpio_set(sim7000g_wake_pin);
 }
 
 void sim7000g_power_off(void) {
@@ -29,6 +31,7 @@ int sim7000g_power_toggle(int argc, char **argv) {
     sim7000g_powerkey_init();
     if (strcmp(argv[1], "on") == 0) {
         sim7000g_power_on();
+	gpio_set(sim7000g_wake_pin);
     }
     else if (strcmp(argv[1], "off") == 0) {
         sim7000g_power_off();
