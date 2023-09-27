@@ -60,6 +60,10 @@
     #define PROMPT_ON 0
 #endif /* SHELL_NO_PROMPT */
 
+#ifndef REMOTE_COMMAND
+    #define REMOTE_COMMAND
+#endif /* REMOTE_COMMAND */
+
 #ifdef MODULE_SHELL_COMMANDS
     #define _builtin_cmds _shell_command_list
 #else
