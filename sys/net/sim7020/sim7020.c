@@ -314,6 +314,7 @@ ret:
 }
 
 int sim7020_stop(void) {
+    status.state = AT_RADIO_STATE_STOPPED;
     stopping = 1;
     return 0;
 }
